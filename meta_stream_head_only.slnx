@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="meta_stream_head_only.vcxproj" Id="8c947356-78c7-4def-bffd-18ae38e5b387" />
+</Solution>
