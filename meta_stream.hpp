@@ -1,6 +1,7 @@
 #include<type_traits>
 #include<utility>
 #include<array>
+#include<functional>
 
 namespace exp_utilities
 {
@@ -47,8 +48,8 @@ namespace exp_utilities
         template<std::size_t ...I>
         struct list_select_impl {
             template<template<typename ...>typename TL, class ...Tys>
-            static constexpr TL<typename exp_select<I, TL<Tys...>>...> apply_impl(TL<Tys...>) {
-                return {};
+            static constexpr auto apply_impl(TL<Tys...>) {
+                return TL<typename exp_select<I, TL<Tys...>>...>{};
             }
 
             template<typename TL>
