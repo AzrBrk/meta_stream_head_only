@@ -49,7 +49,7 @@ namespace exp_utilities
         struct list_select_impl {
             template<template<typename ...>typename TL, class ...Tys>
             static constexpr auto apply_impl(TL<Tys...>) {
-                return TL<typename exp_select<I, TL<Tys...>>...>{};
+                return TL<exp_select<I, TL<Tys...>>...>{};
             }
 
             template<typename TL>
