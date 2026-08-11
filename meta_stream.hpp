@@ -1311,6 +1311,147 @@ namespace meta_ios {
             };
         }
     }
+namespace meta_pipe_node_details {
+    struct advance_node {
+        template<class this_pipe>
+        struct advance_impl {
+            using stream_invoke = transfer<1, typename this_pipe::to, typename this_pipe::from>;
+            using from = typename stream_invoke::from;
+            using to = typename stream_invoke::to;
+        };
+        template<class this_pipe>
+        using apply = io_stream_transform_details::meta_stream<typename advance_impl<this_pipe>::to, typename advance_impl<this_pipe>::from>;
+    };
+
+    template<template<class> class...ps>
+    struct ret_from_node {
+        template<class this_pipe>
+        using apply = meta_fold<this_pipe, protocols::stream_to_t, ps...>;
+    };
+
+    template<
+        io_stream_transform_details::io_stream_traits::meta_istream_t is,
+        io_stream_transform_details::io_stream_traits::meta_ostream_t os,
+        template<class> class...ps>
+    using stream_istream = meta_ret_object<
+        typename io_stream_transform_details::meta_stream<os, is>::update,
+        advance_node,
+        ret_from_node<ps...>
+    >;
+
+    template<class this_pipe>
+    using skip_node = io_stream_transform_details::meta_stream<
+        typename this_pipe::to,
+        meta_invoke<invoke_if<(exp_size<typename this_pipe::from::type> > 0)>,typename this_pipe::from>
+    >;
+
+    template<class meta_function_type>
+    concept has_reset = requires{
+        typename meta_function_type::template reset;
+    };
+    template<class meta_function_type, typename reset_t>
+    struct skip_advance_node {
+        template<class this_pipe>
+        struct advance_impl {
+            using stream_invoke = meta_all_transfer<
+                std::conditional_t<!std::is_same_v<reset_t, void>,
+                typename this_pipe::to::template meta_set<reset_t>, 
+                typename this_pipe::to
+                >,
+                typename this_pipe::from, meta_function_type>;
+            using from = typename skip_node<stream_invoke>::from;
+            using to = typename skip_node<stream_invoke>::to;
+        };
+        template<class this_pipe>
+        using apply = io_stream_transform_details::meta_stream<typename advance_impl<this_pipe>::to, typename advance_impl<this_pipe>::from>;
+    };
+
+    template<
+        io_stream_transform_details::io_stream_traits::meta_istream_t is,
+        io_stream_transform_details::io_stream_traits::meta_ostream_t os,
+        class break_f, class reset_t,
+        template<class> class...ps>
+    using skip_stream_istream = meta_ret_object<
+        skip_node<meta_all_transfer<os, is, break_f>>,
+        skip_advance_node<break_f, reset_t>,
+        ret_from_node<ps...>
+    >;
+
+    template<
+        std::size_t N,
+        io_stream_transform_details::io_stream_traits::meta_istream_t is,
+        io_stream_transform_details::io_stream_traits::meta_ostream_t os,
+        template<class> class...ps/*protocols*/>
+    struct transfer_pipe {
+        template<io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+            template<class> class...other_ps>
+        using all_to = transfer_pipe<
+            exp_size<typename is::type>, stream_istream<is, os, ps...>, another_os, other_ps...
+        >;
+        template<io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+            template<class> class...other_ps>
+        using each_to = transfer_pipe<
+            exp_size<typename is::type>, stream_istream<is, os, ps...>, another_os, protocols::forward_last, other_ps...
+        >;
+
+        template<
+            std::size_t Nc, 
+            io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+            template<class> class...other_ps>
+        using to = transfer_pipe<
+            Nc, stream_istream<is, os, ps...>, another_os, other_ps...
+        >;
+
+        template<
+            std::size_t Nc,
+            io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+            class break_f, typename reset_t,
+            template<class> class...other_ps>
+        using skip_to = transfer_pipe<
+            Nc, skip_stream_istream<is, os, break_f, reset_t, ps...>, another_os, other_ps...
+        >;
+        using from = stream_istream<is, os, ps...>;
+        using transfer = meta_ios::transfer<N, os, is>;
+        template<class meta_function_type>
+        using skip = meta_ios::meta_all_transfer<os, is, meta_function_type>;
+    };
+
+}
+
+    namespace pipe {
+        using meta_pipe_node_details::transfer_pipe;
+        using meta_pipe_node_details::skip_stream_istream;
+        using meta_objects::meta_timer_object_details::meta_always_continue;
+        using io_stream_transform_details::io_stream_traits::meta_istream_t;
+        using io_stream_transform_details::io_stream_traits::meta_ostream_t;
+        template<meta_istream_t is>
+        struct transfer {
+        template<meta_ostream_t another_os,
+            template<class> class...other_ps>
+        using all_to = transfer_pipe<
+            exp_size<typename is::type>, is, another_os, other_ps...
+        >;
+        template<meta_ostream_t another_os,
+            template<class> class...other_ps>
+        using each_to = transfer_pipe<
+            exp_size<typename is::type>, is, another_os, other_ps...,protocols::forward_last
+        >;
+
+        template<std::size_t Nc, meta_ostream_t another_os,
+            template<class> class...other_ps>
+        using to = transfer_pipe<
+            Nc, is, another_os, other_ps...
+        >;
+        
+        template<meta_ostream_t another_os, class break_f, class reset_t,
+            template<class> class...other_ps>
+        using skip_to = pipe::transfer<
+            skip_stream_istream<is, another_os, break_f, reset_t, other_ps...>
+        >;
+
+    };
+    
+    }
 
 }
 
