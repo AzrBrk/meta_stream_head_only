@@ -687,6 +687,7 @@ namespace meta_objects {
      template<size_t reset_time>
      using reset = meta_timer_object<reset_time, OBJ, F, break_f>;
  };
+using meta_empty_o = meta_object<meta_objects_details::meta_empty, meta_objects_details::meta_empty_fn>;
     namespace meta_timer_object_details {
         template<class OBJ, size_t N, class break_f> struct To_Timer {};
         template<class obj, class F, size_t N, class break_f> struct To_Timer<meta_object<obj, F>, N, break_f>
