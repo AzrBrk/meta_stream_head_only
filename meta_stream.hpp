@@ -1213,7 +1213,7 @@ namespace meta_ios {
     template<class T1, class T2>
     using default_combine = exp_list<T1, T2>;
 
-    //in each iteration, F<this_list::at<I>, from_is>
+    //in each iteration, F<this_list::at<I>, from_is>, F is default combine
     template<class TL, class F = meta_quote::binary<default_combine>>
     using meta_forward_ostream = io_stream_transform_details::meta_forward_ostream_details::meta_forward_ostream<TL, F>;
 
