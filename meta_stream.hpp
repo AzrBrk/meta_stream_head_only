@@ -1213,9 +1213,9 @@ namespace meta_ios {
     template<class T1, class T2>
     using default_combine = exp_list<T1, T2>;
 
-    template<class TL, class F = default_combine>
+    //in each iteration, F<this_list::at<I>, from_is>
+    template<class TL, class F = meta_quote::binary<default_combine>>
     using meta_forward_ostream = io_stream_transform_details::meta_forward_ostream_details::meta_forward_ostream<TL, F>;
-
 
     //meta character istream, '0' terminated
     template<static_str str>
