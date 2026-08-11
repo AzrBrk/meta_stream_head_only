@@ -6,10 +6,13 @@
 namespace exp_utilities
 {
     namespace literal_types {
-        struct no_exist_type {};
+        struct no_exist_type: std::false_type {};
 
         template<class L>
-        struct end_of_list {};
+        struct end_of_list {
+            using front = no_exist_type;
+            using back = no_exist_type;
+        };
 
         template<class T>
         struct error {
@@ -122,8 +125,8 @@ namespace exp_utilities
         template<template<class> class F> using for_each = exp_list<>;
         template<class T> using push_back = exp_list<T>;
         template<class T> using push_front = exp_list<T>;
-        using pop_front = literal_types::no_exist_type;
-        using pop_back = literal_types::no_exist_type;
+        using pop_front = literal_types::end_of_list<exp_list<>>;
+        using pop_back = literal_types::end_of_list<exp_list<>>;
         using front = literal_types::no_exist_type;
         using back = literal_types::no_exist_type;
     };
@@ -565,6 +568,33 @@ namespace meta_objects {
         struct meta_empty_fn { template<class T, class ...> using apply = T; };
     }
 
+    namespace initialize_details{
+        template<template<class ...> class apply_shape> struct meta_initializer_container {};
+
+        template<class F, class En = void> struct is_initializer_type : std::false_type {};
+
+        template<class F> 
+        struct is_initializer_type<F, std::void_t<meta_initializer_container<F::template initialize>>> : std::true_type {};
+
+        template<class F>
+        constexpr bool has_initializer = is_initializer_type<F>::value;
+
+        template<class F>
+        struct initialized {
+            template<class OBJ, class ...Arg>
+            using apply = meta_invoke<F, OBJ, Arg...>;
+        };
+
+        template<class F, class ...Arg>
+        struct initialize {
+            using type = typename F::template initialize<Arg...>;
+        };
+    }
+
+    using initialize_details::has_initializer;
+    using initialize_details::initialized;
+    using initialize_details::initialize;
+
     /*A meta obj is a bind of a meta_function and an obj, each time it is invoked, it update itself to a new type,
     use ::type to get the inner obj*/
     template<class OBJ, class F/*Define how to Update an obj*/>
@@ -578,8 +608,20 @@ namespace meta_objects {
         using meta_set = meta_object<ANOTHER_OBJ, F>;
     };
 
-    using meta_empty_o = meta_object<meta_objects_details::meta_empty, meta_objects_details::meta_empty_fn>;
+    template<class OBJ, class F> requires has_initializer<F>/*with F::initialize*/
+    struct meta_object<OBJ, F>
+    {
+        using type = OBJ; //note : OBJ could still fail the Cond_Obj exam in initializer
+        template<class ...Arg>
+        using apply = meta_object<typename initialize<F, OBJ, Arg...>::type, initialized<F>>;
 
+        template<class ANOTHER_OBJ>
+        using meta_set = meta_object<ANOTHER_OBJ, F>;
+    };
+
+    template<class F> requires has_initializer<F>
+    using meta_object_init = meta_object<meta_objects_details::meta_empty, F>;
+ 
     template<class OBJ, class F, class Ret>
     struct meta_ret_object
     {
@@ -591,6 +633,22 @@ namespace meta_objects {
         template<class ANOTHER_OBJ>
         using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
     };
+
+    template<class OBJ, class F, class Ret> requires has_initializer<F>
+    struct meta_ret_object<OBJ, F, Ret>
+    {
+        using ret = meta_invoke<Ret, typename initialize<F, OBJ>::type>;
+        using type = typename initialize<F, OBJ>::type;
+        template<class ...Arg>
+        using apply = meta_ret_object<meta_invoke<F, typename initialize<F, OBJ>::type, Arg...>, initialized<F>, Ret>;
+
+        template<class ANOTHER_OBJ>
+        using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
+    };
+
+    template<class F, class Ret> requires has_initializer<F>
+    using meta_ret_object_init = meta_ret_object<meta_objects_details::meta_empty, F, Ret>;
+
 
     namespace meta_timer_object_details {
         struct meta_break_signal :std::false_type {};
@@ -606,6 +664,8 @@ namespace meta_objects {
         };
     }
 
+
+    //since modifying to timer is forbidden, there is no initializer for meta_timer_object
     template<std::size_t times, class OBJ, class F, class break_f =
         //when true, looper breaks
         meta_timer_object_details::meta_always_continue>
@@ -630,7 +690,7 @@ namespace meta_objects {
         template<size_t reset_time>
         using reset = meta_timer_object<reset_time, OBJ, F, break_f>;
     };
-
+    using meta_empty_o = meta_object<meta_objects_details::meta_empty, meta_objects_details::meta_empty_fn>;
     namespace meta_timer_object_details {
         template<class OBJ, size_t N, class break_f> struct To_Timer {};
         template<class obj, class F, size_t N, class break_f> struct To_Timer<meta_object<obj, F>, N, break_f>
@@ -922,8 +982,13 @@ namespace meta_ios {
                 using type = meta_fold<this_list, add_to_this_list<Tys>::template apply...>;
             };
 
+            struct auto_join {
+                template<class this_list, class T>
+                using apply = typename auto_join_f<this_list, T>::type;
+            };
+
             template<class TL>
-            using join_ostream = meta_object<TL, meta_quote::binary<auto_join_f>>;
+            using join_ostream = meta_object<TL, auto_join>;
         }
 
         namespace meta_filter_ostream_detail {
@@ -1003,7 +1068,6 @@ namespace meta_ios {
                 template <class this_list, class Arg>
                 using apply = typename forward_ostream_f_impl<exp_size<TL>, TL, F>::template apply<this_list, Arg>::type;
             };
-
             template<class TL, class F>
             using meta_forward_ostream = meta_object<exp_list<>, forward_ostream_f<TL, F>>;
         }
@@ -1208,7 +1272,11 @@ namespace meta_ios {
     template<class TL>
     using meta_jostream = io_stream_transform_details::meta_join_ostream_detail::join_ostream<TL>;
 
-    template<class TL, class F>
+    template<class T1, class T2>
+    using default_combine = exp_list<T1, T2>;
+
+    //in each iteration, F<this_list::at<I>, from_is>
+    template<class TL, class F = meta_quote::binary<default_combine>>
     using meta_forward_ostream = io_stream_transform_details::meta_forward_ostream_details::meta_forward_ostream<TL, F>;
 
 
@@ -1216,12 +1284,12 @@ namespace meta_ios {
     template<static_str str>
     using meta_char_istream = meta_istream<
         typename transfer<
-        exp_size<str_to_list<str>> -1,
+        exp_size<str_to_list<str>>,
         meta_ostream<exp_list<>>,
         meta_istream<str_to_list<str>>
         >::to::type
     >;
-
+    
 
     //transfer protocols
     namespace protocols {
@@ -1313,6 +1381,151 @@ namespace meta_ios {
             };
         }
     }
+
+    namespace meta_pipe_node_details {
+        struct advance_node {
+            template<class this_pipe>
+            struct advance_impl {
+                using stream_invoke = transfer<1, typename this_pipe::to, typename this_pipe::from>;
+                using from = typename stream_invoke::from;
+                using to = typename stream_invoke::to;
+            };
+            template<class this_pipe>
+            using apply = io_stream_transform_details::meta_stream<typename advance_impl<this_pipe>::to, typename advance_impl<this_pipe>::from>;
+        };
+
+        template<template<class> class...ps>
+        struct ret_from_node {
+            template<class this_pipe>
+            using apply = meta_fold<this_pipe, protocols::stream_to_t, ps...>;
+        };
+
+        template<
+            io_stream_transform_details::io_stream_traits::meta_istream_t is,
+            io_stream_transform_details::io_stream_traits::meta_ostream_t os,
+            template<class> class...ps>
+        using stream_istream = meta_ret_object<
+            typename io_stream_transform_details::meta_stream<os, is>::update,
+            advance_node,
+            ret_from_node<ps...>
+        >;
+
+        template<class this_pipe>
+        using skip_node = io_stream_transform_details::meta_stream<
+            typename this_pipe::to,
+            meta_invoke<invoke_if<(exp_size<typename this_pipe::from::type> > 0)>,typename this_pipe::from>
+        >;
+
+        template<class meta_function_type>
+        concept has_reset = requires{
+            typename meta_function_type::template reset;
+        };
+        template<class meta_function_type, typename reset_t>
+        struct skip_advance_node {
+            template<class this_pipe>
+            struct advance_impl {
+                using stream_invoke = meta_all_transfer<
+                    std::conditional_t<!std::is_same_v<reset_t, void>,
+                    typename this_pipe::to::template meta_set<reset_t>, 
+                    typename this_pipe::to
+                    >,
+                    typename this_pipe::from, meta_function_type>;
+                using from = typename skip_node<stream_invoke>::from;
+                using to = typename skip_node<stream_invoke>::to;
+            };
+            template<class this_pipe>
+            using apply = io_stream_transform_details::meta_stream<typename advance_impl<this_pipe>::to, typename advance_impl<this_pipe>::from>;
+        };
+
+        template<
+            io_stream_transform_details::io_stream_traits::meta_istream_t is,
+            io_stream_transform_details::io_stream_traits::meta_ostream_t os,
+            class break_f, class reset_t,
+            template<class> class...ps>
+        using skip_stream_istream = meta_ret_object<
+            skip_node<meta_all_transfer<os, is, break_f>>,
+            skip_advance_node<break_f, reset_t>,
+            ret_from_node<ps...>
+        >;
+
+        template<
+            std::size_t N,
+            io_stream_transform_details::io_stream_traits::meta_istream_t is,
+            io_stream_transform_details::io_stream_traits::meta_ostream_t os,
+            template<class> class...ps/*protocols*/>
+        struct transfer_pipe {
+            template<io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+                template<class> class...other_ps>
+            using all_to = transfer_pipe<
+                exp_size<typename is::type>, stream_istream<is, os, ps...>, another_os, other_ps...
+            >;
+            template<io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+                template<class> class...other_ps>
+            using each_to = transfer_pipe<
+                exp_size<typename is::type>, stream_istream<is, os, ps...>, another_os, protocols::forward_last, other_ps...
+            >;
+
+            template<
+                std::size_t Nc, 
+                io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+                template<class> class...other_ps>
+            using to = transfer_pipe<
+                Nc, stream_istream<is, os, ps...>, another_os, other_ps...
+            >;
+
+            template<
+                std::size_t Nc,
+                io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
+                class break_f, typename reset_t,
+                template<class> class...other_ps>
+            using skip_to = transfer_pipe<
+                Nc, skip_stream_istream<is, os, break_f, reset_t, ps...>, another_os, other_ps...
+            >;
+            using from = stream_istream<is, os, ps...>;
+            using transfer = meta_ios::transfer<N, os, is>;
+            template<class meta_function_type>
+            using skip = meta_ios::meta_all_transfer<os, is, meta_function_type>;
+        };
+
+    }
+
+    namespace pipe {
+        using meta_pipe_node_details::transfer_pipe;
+        using meta_pipe_node_details::skip_stream_istream;
+        using meta_objects::meta_timer_object_details::meta_always_continue;
+        using io_stream_transform_details::io_stream_traits::meta_istream_t;
+        using io_stream_transform_details::io_stream_traits::meta_ostream_t;
+        template<meta_istream_t is>
+        struct transfer {
+            template<meta_ostream_t another_os,
+                template<class> class...other_ps>
+            using all_to = transfer_pipe<
+                exp_size<typename is::type>, is, another_os, other_ps...
+            >;
+            template<meta_ostream_t another_os,
+                template<class> class...other_ps>
+            using each_to = transfer_pipe<
+                exp_size<typename is::type>, is, another_os, other_ps...,protocols::forward_last
+            >;
+
+            template<std::size_t Nc, meta_ostream_t another_os,
+                template<class> class...other_ps>
+            using to = transfer_pipe<
+                Nc, is, another_os, other_ps...
+            >;
+            
+            template<meta_ostream_t another_os, class break_f, class reset_t,
+                template<class> class...other_ps>
+            using skip_to = pipe::transfer<
+                skip_stream_istream<is, another_os, break_f, reset_t, other_ps...>
+            >;
+
+        };
+        
+    }
+
+    
+
 
 }
 
