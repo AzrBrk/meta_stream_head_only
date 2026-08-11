@@ -1210,7 +1210,10 @@ namespace meta_ios {
     template<class TL>
     using meta_jostream = io_stream_transform_details::meta_join_ostream_detail::join_ostream<TL>;
 
-    template<class TL, class F>
+    template<class T1, class T2>
+    using default_combine = exp_list<T1, T2>;
+
+    template<class TL, class F = default_combine>
     using meta_forward_ostream = io_stream_transform_details::meta_forward_ostream_details::meta_forward_ostream<TL, F>;
 
 
