@@ -565,70 +565,129 @@ namespace meta_objects {
         struct meta_empty_fn { template<class T, class ...> using apply = T; };
     }
 
-    /*A meta obj is a bind of a meta_function and an obj, each time it is invoked, it update itself to a new type,
-    use ::type to get the inner obj*/
-    template<class OBJ, class F/*Define how to Update an obj*/>
-    struct meta_object
-    {
-        using type = OBJ;
-        template<class ...Arg>
-        using apply = meta_object<meta_invoke<F, OBJ, Arg...>, F>;
+ namespace initialize_details{
+     template<template<class ...> class apply_shape> struct meta_initializer_container {};
 
-        template<class ANOTHER_OBJ>
-        using meta_set = meta_object<ANOTHER_OBJ, F>;
-    };
+     template<class F, class En = void> struct is_initializer_type : std::false_type {};
 
-    using meta_empty_o = meta_object<meta_objects_details::meta_empty, meta_objects_details::meta_empty_fn>;
+     template<class F> 
+     struct is_initializer_type<F, std::void_t<meta_initializer_container<F::template initialize>>> : std::true_type {};
 
-    template<class OBJ, class F, class Ret>
-    struct meta_ret_object
-    {
-        using ret = meta_invoke<Ret, OBJ>;
-        using type = OBJ;
-        template<class ...Arg>
-        using apply = meta_ret_object<meta_invoke<F, OBJ, Arg...>, F, Ret>;
+     template<class F>
+     constexpr bool has_initializer = is_initializer_type<F>::value;
 
-        template<class ANOTHER_OBJ>
-        using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
-    };
+     template<class F>
+     struct initialized {
+         template<class OBJ, class ...Arg>
+         using apply = meta_invoke<F, OBJ, Arg...>;
+     };
 
-    namespace meta_timer_object_details {
-        struct meta_break_signal :std::false_type {};
+     template<class F, class ...Arg>
+     struct initialize {
+         using type = typename F::template initialize<Arg...>;
+     };
+ }
 
-        template<class Fn, class DF> struct meta_break_if
-        {
-            template<class T> using apply = std::conditional_t<meta_invoke<Fn, T>::value, meta_break_signal, DF>;
-        };
-        struct meta_always_continue
-        {
-            template<class T> struct apply :std::false_type
-            {};
-        };
-    }
+ using initialize_details::has_initializer;
+ using initialize_details::initialized;
+ using initialize_details::initialize;
 
-    template<std::size_t times, class OBJ, class F, class break_f =
-        //when true, looper breaks
-        meta_timer_object_details::meta_always_continue>
-    struct meta_timer_object
-    {
-        using timer = meta_invoke<
-            //if meta_invoke<break_f, OBJ>::value == true, timer = meta_break_signal
-            //else timer = times > 0 ? timer - 1 : looper stop condition
-            meta_timer_object_details::meta_break_if<break_f, std::integral_constant<bool, (times > 0)>>,
-            OBJ
-        >;
+ /*A meta obj is a bind of a meta_function and an obj, each time it is invoked, it update itself to a new type,
+ use ::type to get the inner obj*/
+ template<class OBJ, class F/*Define how to Update an obj*/>
+ struct meta_object
+ {
+     using type = OBJ;
+     template<class ...Arg>
+     using apply = meta_object<meta_invoke<F, OBJ, Arg...>, F>;
 
-        using type = OBJ;
-        template<class ...Arg>
-        using apply = meta_timer_object<times - 1, meta_invoke<F, OBJ, Arg...>, F, break_f>;
+     template<class ANOTHER_OBJ>
+     using meta_set = meta_object<ANOTHER_OBJ, F>;
+ };
 
-        template<class ANOTHER_OBJ>
-        using meta_set = meta_timer_object<times, ANOTHER_OBJ, F, break_f>;
+ template<class OBJ, class F> requires has_initializer<F>/*with F::initialize*/
+ struct meta_object<OBJ, F>
+ {
+     using type = OBJ; //note : OBJ could still fail the Cond_Obj exam in initializer
+     template<class ...Arg>
+     using apply = meta_object<typename initialize<F, OBJ, Arg...>::type, initialized<F>>;
 
-        template<size_t reset_time>
-        using reset = meta_timer_object<reset_time, OBJ, F, break_f>;
-    };
+     template<class ANOTHER_OBJ>
+     using meta_set = meta_object<ANOTHER_OBJ, F>;
+ };
 
+ template<class F> requires has_initializer<F>
+ using meta_object_init = meta_object<void, F>;
+ 
+ template<class OBJ, class F, class Ret>
+ struct meta_ret_object
+ {
+     using ret = meta_invoke<Ret, OBJ>;
+     using type = OBJ;
+     template<class ...Arg>
+     using apply = meta_ret_object<meta_invoke<F, OBJ, Arg...>, F, Ret>;
+
+     template<class ANOTHER_OBJ>
+     using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
+ };
+
+ template<class OBJ, class F, class Ret> requires has_initializer<F>
+ struct meta_ret_object<OBJ, F, Ret>
+ {
+     using ret = meta_invoke<Ret, typename initialize<F, OBJ>::type>;
+     using type = typename initialize<F, OBJ>::type;
+     template<class ...Arg>
+     using apply = meta_ret_object<meta_invoke<F, typename initialize<F, OBJ>::type, Arg...>, initialized<F>, Ret>;
+
+     template<class ANOTHER_OBJ>
+     using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
+ };
+
+ template<class F, class Ret> requires has_initializer<F>
+ using meta_ret_object_init = meta_ret_object<meta_objects_details::meta_empty, F, Ret>;
+
+
+ namespace meta_timer_object_details {
+     struct meta_break_signal :std::false_type {};
+
+     template<class Fn, class DF> struct meta_break_if
+     {
+         template<class T> using apply = std::conditional_t<meta_invoke<Fn, T>::value, meta_break_signal, DF>;
+     };
+     struct meta_always_continue
+     {
+         template<class T> struct apply :std::false_type
+         {};
+     };
+ }
+
+
+ //since modifying to timer is forbidden, there is no initializer for meta_timer_object
+ template<std::size_t times, class OBJ, class F, class break_f =
+     //when true, looper breaks
+     meta_timer_object_details::meta_always_continue>
+ struct meta_timer_object
+ {
+     using timer = meta_invoke<
+            
+         //meta_break_if<Pred, Default_if_false_t>, Arg>
+         //if(Pred<Arg> == true) return meta_break_signal
+         //else return Default_if_false_t
+         meta_timer_object_details::meta_break_if<break_f, std::integral_constant<bool, (times > 0)>>,
+         OBJ
+     >;
+
+     using type = OBJ;
+     template<class ...Arg>
+     using apply = meta_timer_object<times - 1, meta_invoke<F, OBJ, Arg...>, F, break_f>;
+
+     template<class ANOTHER_OBJ>
+     using meta_set = meta_timer_object<times, ANOTHER_OBJ, F, break_f>;
+
+     template<size_t reset_time>
+     using reset = meta_timer_object<reset_time, OBJ, F, break_f>;
+ };
+using meta_empty_o = meta_object<meta_objects_details::meta_empty, meta_objects_details::meta_empty_fn>;
     namespace meta_timer_object_details {
         template<class OBJ, size_t N, class break_f> struct To_Timer {};
         template<class obj, class F, size_t N, class break_f> struct To_Timer<meta_object<obj, F>, N, break_f>
