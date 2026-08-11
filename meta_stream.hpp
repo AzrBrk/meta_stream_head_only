@@ -919,9 +919,13 @@ namespace meta_ios {
             struct auto_join_f<this_list, L<Tys...>> {
                 using type = meta_fold<this_list, add_to_this_list<Tys>::template apply...>;
             };
+            struct auto_join {
+                template<class this_list, class T>
+                using apply = typename auto_join_f<this_list, T>::type;
+            };
 
             template<class TL>
-            using join_ostream = meta_object<TL, meta_quote::binary<auto_join_f>>;
+            using join_ostream = meta_object<TL, auto_join>;
         }
 
         namespace meta_filter_ostream_detail {
