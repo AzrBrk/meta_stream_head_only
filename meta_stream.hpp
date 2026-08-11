@@ -1345,10 +1345,7 @@ namespace meta_pipe_node_details {
         meta_invoke<invoke_if<(exp_size<typename this_pipe::from::type> > 0)>,typename this_pipe::from>
     >;
 
-    template<class meta_function_type>
-    concept has_reset = requires{
-        typename meta_function_type::template reset;
-    };
+   
     template<class meta_function_type, typename reset_t>
     struct skip_advance_node {
         template<class this_pipe>
