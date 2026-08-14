@@ -2,6 +2,7 @@
 #include<utility>
 #include<array>
 #include<functional>
+#include<algorithm>
 
 namespace exp_utilities
 {
@@ -1114,6 +1115,7 @@ namespace meta_ios {
         }
 
 
+        #include<typeinfo>
         template<io_stream_traits::meta_ostream_t To, io_stream_traits::meta_istream_t From> struct meta_stream
         {
             using from = From;
@@ -1121,6 +1123,10 @@ namespace meta_ios {
             using from_t = typename from::type;
             using to_t = typename to::type;
             using cache = typename From::ret;
+
+            template<class ...Arg>
+            using invoke_to = meta_stream<meta_invoke<To, Arg...>, from>;
+
             using update = meta_stream<
                 //invoke ostream with read in from istream if istream is not empty
                 meta_invoke<invoke_object_if<!length_equal<typename From::type, 0>>, To, From>,
@@ -1128,7 +1134,13 @@ namespace meta_ios {
                 //update the istream if it's not empty
                 meta_invoke<invoke_if<!length_equal<typename From::type, 0>>, From>
             >;
-            consteval auto value() {
+            constexpr type_info const& target_type()const {
+                return typeid(to_t);
+            }
+            constexpr to_t object()const {
+                return to_t{};
+            }
+            consteval auto value()const {
                 if constexpr (has_value<to_t>) {
                     return to_t::value;
 
@@ -1137,7 +1149,7 @@ namespace meta_ios {
                     return literal_types::no_exist_type{};
                 }
             }
-            consteval std::size_t length() {
+            consteval std::size_t left()const {
                 return exp_size<from_t>;
             }
         };
