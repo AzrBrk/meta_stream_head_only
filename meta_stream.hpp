@@ -1389,6 +1389,48 @@ namespace meta_ios {
             };
         }
     }
+ namespace meta_aligned_iterator_details {
+     template<class from_ins>
+     struct seek_to_v {
+         template<class addr_type>
+         struct apply {
+             static constexpr bool value = !static_cast<bool>(addr_type::value % alignof(from_ins));
+         };
+     };
+     template<std::size_t start, class from_ins>
+     struct seek_to {
+         using seek_t = typename transfer_until<
+             meta_iterator::template meta_set<std::integral_constant<std::size_t, start>>,
+             meta_index_istream<start>,
+             protocols::only_stream_to_unref<seek_to_v<from_ins>>
+         >::to_t;
+         using advance_t = std::integral_constant<std::size_t, seek_t::value + sizeof(from_ins)>;
+         using type = from_ins;
+         static constexpr std::size_t value = seek_t::value;
+         void emplace(std::byte* ptr, type const& val) {
+             new(ptr + value) type{ val };
+         }
+         void destroy(std::byte* ptr) {
+             std::destroy_at(reinterpret_cast<type*>(ptr + value));
+         }
+         type& get(std::byte* ptr) {
+             return *reinterpret_cast<type*>(ptr + value);
+         }
+         type const& c_get(std::byte* ptr) {
+             return *reinterpret_cast<type*>(ptr + value);
+         }
+     };
+     struct advance_f {
+         template<class this_seek, class from_ins>
+         using apply = seek_to<this_seek::advance_t::value, from_ins>;
+         template<class this_seek, class from_ins>
+         using initialize = seek_to<0, from_ins>;
+     };
+ }
+ /// <summary>
+ /// for meta_aligned_iterator, it is a meta_ostream_t that can seek to an aligned address for a specific type in a byte stream, and it can also advance to the next aligned address for the next type.  
+ /// </summary>
+ using meta_aligned_iterator = meta_object_init<meta_aligned_iterator_details::advance_f>;
 namespace meta_pipe_node_details {
     struct advance_node {
         template<class this_pipe>
