@@ -1134,7 +1134,7 @@ namespace meta_ios {
                 //update the istream if it's not empty
                 meta_invoke<invoke_if<!length_equal<typename From::type, 0>>, From>
             >;
-            constexpr type_info const& target_type()const {
+            constexpr std::type_info const& target_type()const {
                 return typeid(to_t);
             }
             constexpr to_t object()const {
