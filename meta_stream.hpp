@@ -1314,6 +1314,10 @@ namespace meta_ios {
 
     using meta_iterator = io_stream_transform_details::meta_replace_able_ostream_detail::replace_able_ostream;
 
+    //fold operation, but with stream protocol control, can be blocked
+    template<class F, typename init = literal_types::no_exist_type>
+    using meta_transform_iterator = io_stream_transform_details::meta_transform_iterator_detail::transform_iterator<F, init>;
+
     //generate an specific type T for each element in the istream
     //note: this istream never ends
     template<class T>
