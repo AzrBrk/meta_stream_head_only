@@ -1446,6 +1446,7 @@ namespace meta_ios {
     template<template<class> class ...PS>
     auto protocol_call(auto&& f) {
         using protocol_auto_unref_details::has_no_protocol_v;
+        using protocol_auto_unref_details::fold_result;
         if constexpr (
             has_no_protocol_v<protocols::stream_to_t, PS...> &&
             has_no_protocol_v<protocols::stream_from_t, PS...> &&
