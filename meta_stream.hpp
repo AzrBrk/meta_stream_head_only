@@ -1496,7 +1496,7 @@ namespace meta_pipe_node_details {
         io_stream_transform_details::io_stream_traits::meta_ostream_t os,
         template<class> class...ps>
     using stream_istream = meta_ret_object<
-        typename io_stream_transform_details::meta_stream<os, is>::update,
+        transfer<1, os, is>,
         advance_node,
         ret_from_node<ps...>
     >;
