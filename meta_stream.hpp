@@ -1038,6 +1038,25 @@ namespace meta_ios {
 
             using replace_able_ostream = meta_object<no_exist_type, meta_quote::binary<replace_this>>;
         }
+        namespace meta_transform_iterator_detail {
+            using exp_utilities::literal_types::no_exist_type;
+            template<class F>
+            struct transform_iterator_f {
+                template<class this_obj, class from_ins>
+                    using apply = meta_invoke<F, this_obj, from_ins>;
+            };
+
+            template<class F> requires (meta_objects::initialize_details::has_initializer<F>)
+            struct transform_iterator_f<F> {
+                template<class this_obj, class from_ins> 
+                using initialize = meta_objects::initialize_details::initialize<F, this_obj, from_ins>;
+                template<class this_obj, class from_ins>
+                using apply = meta_invoke<F, this_obj, from_ins>;
+            };
+
+            template<class F, typename T>
+            using transform_iterator = meta_object<T, transform_iterator_f<F>>;
+        }
 
         namespace meta_self_repeat_ostream_detail {
             template<class this_obj>
@@ -1135,13 +1154,6 @@ namespace meta_ios {
             template<class ...Arg>
             using invoke_to = meta_stream<meta_invoke<To, Arg...>, from>;
 
-            using update = meta_stream<
-                //invoke ostream with read in from istream if istream is not empty
-                meta_invoke<invoke_object_if<!length_equal<typename From::type, 0>>, To, From>,
-
-                //update the istream if it's not empty
-                meta_invoke<invoke_if<!length_equal<typename From::type, 0>>, From>
-            >;
             constexpr std::type_info const& target_type()const {
                 return typeid(to_t);
             }
@@ -1163,12 +1175,34 @@ namespace meta_ios {
         };
 
 
-        struct meta_stream_f
-        {
-            template<class mo_stream, class...>
-            using apply = typename mo_stream::update;
+      template<class meta_stream_t>
+    struct meta_stream_update {
+        using type = meta_stream_t;
+    };
+
+    template<class To, class From> requires (std::is_same_v<typename From::type, literal_types::end_of_list<typename From::type>>)
+    struct meta_stream_update<meta_stream<To, From>> {
+        using type = meta_stream<To, From>;
+    };
+
+    template<class To, class From> requires (!length_equal<typename From::type, 0>)
+    struct meta_stream_update<meta_stream<To, From>> {
+        using type = meta_stream<meta_object_invoke<To, From>, meta_invoke<From>>;
+    };
+
+    struct meta_stream_f
+    {
+        template<class mo_stream, class...>
+        using apply = typename meta_stream_update<mo_stream>::type;
+    };
+
+    struct meta_stream_always_continue {
+    template<class in_stream_t>
+    struct apply {
+        static constexpr bool value = std::is_same_v<typename in_stream_t::from::ret, literal_types::end_of_list<typename in_stream_t::from::type>>;
         };
-    }
+     };
+}
 
     //convert meta_stream into a timed meta_object
     template<std::size_t Transfer_Length,
