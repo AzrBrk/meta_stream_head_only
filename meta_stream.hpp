@@ -660,6 +660,14 @@ namespace meta_objects {
          template<class T> struct apply :std::false_type
          {};
      };
+    template<class MTO, class ...Arg>
+    struct stop_forward_next_if_break_f_is_true {
+        using type = MTO;
+    };
+    template<template<std::size_t, class, class, class>class meta_timer_template, std::size_t times, class OBJ, class F, class break_f, class ...Arg> requires (!std::is_same_v<typename meta_timer_template<times, OBJ, F, break_f>::timer, meta_break_signal>)
+    struct stop_forward_next_if_break_f_is_true<meta_timer_template<times, OBJ, F, break_f>, Arg...> {
+        using type = meta_timer_template<times - 1, meta_invoke<F, OBJ, Arg...>, F, break_f>;
+    };
  }
 
 
@@ -680,7 +688,7 @@ namespace meta_objects {
 
      using type = OBJ;
      template<class ...Arg>
-     using apply = meta_timer_object<times - 1, meta_invoke<F, OBJ, Arg...>, F, break_f>;
+     using apply = typename meta_timer_object_details::stop_forward_next_if_break_f_is_true<meta_timer_object<times, OBJ, F, break_f>, Arg...>::type;
 
      template<class ANOTHER_OBJ>
      using meta_set = meta_timer_object<times, ANOTHER_OBJ, F, break_f>;
