@@ -1376,6 +1376,11 @@ namespace meta_ios {
 
         template<class type_list>
         using forward_last = exp_select<max_index<type_list>, type_list>;
+
+        struct meta_stream_skip_signal {};
+
+        template<class meta_stream_type>
+        using wait_for_end = std::conditional_t<!length_equal<typename meta_stream_type::from::type, 0>, meta_stream_skip_signal, meta_stream_type>;
     }
 
 
@@ -1384,7 +1389,10 @@ namespace meta_ios {
         //if has no protocol stream_to_t/stream_from_t/stream_cache_t, default adding protocol stream_to_t.
         //detect protocols
         template<template<class> class P>
-        struct protocol_container {};
+        struct protocol_container {
+             template<class T>
+             using transform = P<T>;
+        };
 
         template<template<class> class P1, template<class> class P2>
         struct template_equal {
@@ -1411,6 +1419,25 @@ namespace meta_ios {
         template<template<class> class P, template<class> class ...PS>
         constexpr bool has_no_protocol_v = length_equal<has_protocol<P, PS...>, 0>;
 
+        using protocols::meta_stream_skip_signal;
+
+        struct fold_transition {
+            template<class this_obj, class from_ins>
+            struct impl {
+                using type = typename from_ins::template transform<this_obj>;
+            };
+            template<class this_obj, class from_ins>
+            using apply = typename impl<this_obj, from_ins>::type;
+        };
+
+        using break_if_result_is_skip_signal = protocols::only_stream_to_unref<meta_quote::bind_binary<std::is_same, meta_stream_skip_signal>>;
+
+        template<class in_stream_t, template<class> class ...PS>
+        using fold_result = meta_all_transfer<
+            meta_transform_iterator<fold_transition, in_stream_t>,
+            meta_istream_list<protocol_container<PS>...>,
+            break_if_result_is_skip_signal>::to_t;
+
     }
     template<template<class> class ...PS>
     auto protocol_call(auto&& f) {
@@ -1421,13 +1448,17 @@ namespace meta_ios {
             has_no_protocol_v<protocols::stream_cache_t, PS...>)
         {
             return[&f]<class in_stream_t, class ...Args>(in_stream_t, Args&&...args) {
-                std::invoke(f, meta_fold<in_stream_t, protocols::stream_to_t, PS...>{}, std::forward<Args>(args)...);
+                using fold_result_t = fold_result<in_stream_t, protocols::stream_to_t, PS...>;
+                if constexpr (!std::is_same_v<fold_result_t, protocols::meta_stream_skip_signal>)
+                std::invoke(f, fold_result_t{}, std::forward<Args>(args)...);
             };
         }
         else
         {
             return[&f]<class in_stream_t, class ...Args>(in_stream_t, Args&&...args) {
-                std::invoke(f, meta_fold<in_stream_t, PS...>{}, std::forward<Args>(args)...);
+                using fold_result_t = fold_result<in_stream_t, PS...>;
+                if constexpr(!std::is_same_v<fold_result_t, protocols::meta_stream_skip_signal>)
+                    std::invoke(f, fold_result_t{}, std::forward<Args>(args)...);
             };
         }
     }
