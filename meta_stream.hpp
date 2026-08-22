@@ -805,19 +805,29 @@ namespace meta_loop {
                 using type = typename track_apply_t::type;
 
                 template<class ...arg_types>
-                static constexpr auto for_each(auto&& f, arg_types &&...args) {
+                static constexpr auto for_each(auto&& f, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...)) {
                     if constexpr (_continue_) {
                         std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
                         return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
                     }
+                    else{
+                        return std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                    }
                 }
 
                 template<class first_arg_type, class ...arg_types>
-                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args) {
+                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first))) {
                     if constexpr (_continue_) {
-                        std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                        if constexpr (sizeof ...(arg_types))
+                        if constexpr (sizeof ...(arg_types)){
+                            std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
                             return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+                        }
+                        else{
+                            return std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                        }
+                    }
+                    else{
+                        std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
                     }
                 }
             };
@@ -830,11 +840,11 @@ namespace meta_loop {
             using type = typename MO::type;
             template<class ...arg_types>
             static constexpr auto for_each(auto&& f, arg_types &&...args) {
-                std::invoke(f, typename MO::type{}, std::forward<arg_types>(args)...);
+                return std::invoke(f, typename MO::type{}, std::forward<arg_types>(args)...);
             }
             template<class first_arg_type, class ...arg_types>
             static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args) {
-                std::invoke(f, typename MO::type{}, std::forward<first_arg_type>(first));
+                return std::invoke(f, typename MO::type{}, std::forward<first_arg_type>(first));
             }
         };
     }
