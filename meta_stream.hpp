@@ -810,9 +810,6 @@ namespace meta_loop {
                         std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
                         return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
                     }
-                    else{
-                        return std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                    }
                 }
 
                 template<class first_arg_type, class ...arg_types>
