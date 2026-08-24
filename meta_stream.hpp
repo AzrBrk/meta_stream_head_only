@@ -150,7 +150,7 @@ namespace exp_utilities
             static constexpr std::size_t value = TL::length;
         };
 
-        template<template<class...> class TL, class ...Tys>
+        template<template<class...> class TL, class ...Tys> requires (!has_length<TL<Tys...>>)
         struct type_list_size<TL<Tys...>>
         {
             static constexpr std::size_t value = sizeof...(Tys);
