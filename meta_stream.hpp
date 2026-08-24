@@ -102,7 +102,7 @@ namespace exp_utilities
 
     }
     template<class TL>
-    using pop_last<TL> = exp_list_details::pop_last<TL>;
+    using pop_last = exp_list_details::pop_last<TL>;
 
     template<class First, class ...Tys>
     struct exp_list<First, Tys...> {
