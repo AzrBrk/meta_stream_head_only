@@ -101,6 +101,8 @@ namespace exp_utilities
         using pop_last = std::conditional_t<(TL::length >= 1), typename to_exp_list_select_t<std::make_index_sequence<TL::length - 1>>::template apply<TL>, exp_list<>>;
 
     }
+    template<class TL>
+    using pop_last<TL> = exp_list_details::pop_last<TL>;
 
     template<class First, class ...Tys>
     struct exp_list<First, Tys...> {
