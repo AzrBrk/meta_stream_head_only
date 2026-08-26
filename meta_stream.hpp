@@ -1497,6 +1497,9 @@ namespace meta_ios {
          type& get(std::byte* ptr) {
              return *reinterpret_cast<type*>(ptr + value);
          }
+        std::byte* address_of(std::byte* base_ptr) {
+            return base_ptr + value;
+        }
          type const& c_get(std::byte* ptr) {
              return *reinterpret_cast<type*>(ptr + value);
          }
