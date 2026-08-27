@@ -1608,7 +1608,7 @@ namespace meta_ios {
         using protocol_auto_unref_details::fold_result;
         if constexpr (
             has_no_protocol_v<protocols::stream_to_t, PS...> &&
-            has_no_protocol_v<protocols::stream_from_tauto, PS...> &&
+            has_no_protocol_v<protocols::stream_from_t, PS...> &&
             has_no_protocol_v<protocols::stream_cache_t, PS...>)
         {
             
