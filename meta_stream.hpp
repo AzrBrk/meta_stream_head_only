@@ -173,6 +173,98 @@ namespace exp_utilities
 
     template<class F>
     using exp_function_info = exp_function_info_details::function_info<F>;
+    template<class T>
+    struct any_caster {
+        constexpr any_caster()noexcept :_dummy(), _has_value(false) {}
+        constexpr any_caster(const T& val) : _has_value(false) {
+            std::construct_at(&_value, val);
+            _has_value = true;
+        }
+        constexpr any_caster(T&& val) : _has_value(false) {
+            std::construct_at(&_value, std::move(val));
+            _has_value = true;
+        }
+        constexpr any_caster(const any_caster& another) : _has_value(false) {
+            if (another._has_value) {
+                std::construct_at(&_value, another._value);
+                _has_value = true;
+            }
+        }
+        constexpr any_caster(any_caster&& another)noexcept :_has_value(false) {
+            if (another._has_value) {
+                std::construct_at(&_value, std::move(another._value));
+                _has_value = true;
+            }
+        }
+        //if T is constexpr - able, then this function will return a constexpr value of T
+        constexpr T constexpr_value() {
+            return T{};
+        }
+
+        //if T is constexpr - able, then this function will return a constexpr value of T constructed with val
+        template<auto val>
+        constexpr T constexpr_value() {
+            return T{val};
+        }
+        constexpr T value() {
+            return _value;
+        }
+        constexpr any_caster& operator=(const any_caster& another) {
+            if (this == &another) return *this;
+            if (_has_value && another._has_value) {
+                _value = another._value;
+            }
+            else if (_has_value && !another._has_value) {
+                std::destroy_at(&_value);
+                _has_value = false;
+            }
+            else if (!_has_value && another._has_value) {
+                std::construct_at(&_value, another._value);
+                _has_value = true;
+            }
+            return *this;
+        }
+        constexpr any_caster& operator=(any_caster&& another) {
+            if (this == &another) return *this;
+            if (_has_value && another._has_value) {
+                _value = std::move(another._value);
+            }
+            else if (_has_value && !another._has_value) {
+                std::destroy_at(&_value);
+                _has_value = false;
+            }
+            else if (!_has_value && another._has_value) {
+                std::construct_at(&_value, std::move(another._value));
+                _has_value = true;
+            }
+            return *this;
+        }
+        union {
+            char _dummy;
+            T _value;
+        };
+        bool _has_value;
+        constexpr ~any_caster() {
+            if (_has_value) {
+                std::destroy_at(&_value);
+            }
+        }
+        operator T() {
+            return _value;
+        }
+        constexpr explicit operator bool() const noexcept {
+            return _has_value;
+        }
+        constexpr bool has_value() {
+            return _has_value;
+        }
+        constexpr T& operator*() {
+            return _value;
+        }
+        constexpr const T& operator*()const {
+            return _value;
+        }
+    };
 
     template<class TL>  concept exp_list_based = exp_list_details::is_exp_list_based<TL>::value;
     namespace exp_size_details {
@@ -741,6 +833,7 @@ namespace meta_objects {
     using meta_empty_o = meta_object<meta_objects_details::meta_empty, meta_objects_details::meta_empty_fn>;
     namespace meta_timer_object_details {
         template<class OBJ, size_t N, class break_f> struct To_Timer {};
+
         template<class obj, class F, size_t N, class break_f> struct To_Timer<meta_object<obj, F>, N, break_f>
         {
             using type = meta_timer_object<N, obj, F, break_f>;
@@ -766,7 +859,7 @@ namespace meta_objects {
             using type = typename To_T::template meta_set<typename From_T::type>;
         };
 
-        //transfer timer if invoke to a meta_timer_oject
+        //transfer timer if invoke to a meta_timer_oect
         template<size_t times, class obj, class F, class To_T, class B>
         struct meta_transfer_object_impl<meta_timer_object<times, obj, F, B>, To_T> {
             using type = typename To_T::template meta_set<typename meta_timer_object<times, obj, F, B>::timer>;
@@ -846,56 +939,56 @@ namespace meta_loop {
                 >, Args...>;
                 using type = typename track_apply_t::type;
 
-                   template<class ...arg_types>
-    static constexpr auto for_each(auto&& f, arg_types &&...args) -> decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...)) {
-        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
+                template<class ...arg_types>
+                static constexpr auto for_each(auto&& f, arg_types &&...args) -> decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...)) {
+                    using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
 
-        if constexpr (std::is_same_v<return_type, void>)
-        {
-            if constexpr (_continue_)
-            {
-                std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-            }
-        }
-        else {
-            return_type ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-            if constexpr (track_apply_t::_continue_) {
-                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-            }
-            else {
-                return ret_val;
-            }
-        }
-    }
-
-
-    template<class first_arg_type, class ...arg_types>
-    static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first))) {
-        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
-        if constexpr (std::is_same_v<return_type, void>)
-        {
-            if constexpr (_continue_) {
-                std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                if constexpr (sizeof ...(arg_types))
-                {
-                    return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+                    if constexpr (std::is_same_v<return_type, void>)
+                    {
+                        if constexpr (_continue_)
+                        {
+                            std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+                        }
+                    }
+                    else {
+                        return_type ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                        if constexpr (track_apply_t::_continue_) {
+                            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+                        }
+                        else {
+                            return ret_val;
+                        }
+                    }
                 }
-            }
-        }
-        else {
-            auto ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-            if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
-                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
-            }
-            else {
-                return ret_val;
-            }
 
-        }
-       
-    }
-};
+
+                template<class first_arg_type, class ...arg_types>
+                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first))) {
+                    using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
+                    if constexpr (std::is_same_v<return_type, void>)
+                    {
+                        if constexpr (_continue_) {
+                            std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                            if constexpr (sizeof ...(arg_types))
+                            {
+                                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+                            }
+                        }
+                    }
+                    else {
+                        auto ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                        if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
+                            return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+                        }
+                        else {
+                            return ret_val;
+                        }
+
+                    }
+                   
+                }
+            };
         };
 
 
@@ -903,6 +996,7 @@ namespace meta_loop {
         {
             static constexpr bool _continue_ = false;
             using type = typename MO::type;
+        };
     }
 
     template<class C, class O, class G, class ...ARG_Tys>
@@ -1478,7 +1572,7 @@ namespace meta_ios {
             template<class T>
             struct apply_impl :std::false_type {};
             template<template<class> class anotherP>
-            struct apply_impl<protocol_container<anotherP>> :template_equal<P, anotherP> {};
+            struct apply_impl<protocol_container<anotherP>> : template_equal<P, anotherP> {};
 
             template<class T>
             using apply = apply_impl<T>;
@@ -1512,87 +1606,8 @@ namespace meta_ios {
             meta_istream_list<protocol_container<PS>...>,
             break_if_result_is_skip_signal>::to_t;
 
-        template<class T>
-        struct any_caster {
-            constexpr any_caster()noexcept :_dummy(),_has_value(false) {}
-            constexpr any_caster(const T& val) : _has_value(false) {
-                std::construct_at(&_value, val);
-                _has_value = true;
-            }
-            constexpr any_caster(T&& val) : _has_value(false) {
-                std::construct_at(&_value, std::move(val));
-                _has_value = true;
-            }
-            constexpr any_caster(const any_caster& another) : _has_value(false) {
-                if (another._has_value) {
-                    std::construct_at(&_value, another._value);
-                    _has_value = true;
-                }
-            }
-            constexpr any_caster(any_caster&& another)noexcept :_has_value(false) {
-                if (another._has_value) {
-                    std::construct_at(&_value, std::move(another._value));
-                    _has_value = true;
-                }
-            }
-            constexpr any_caster& operator=(const any_caster& another) {
-                if (this == &another) return *this;
-                if (_has_value && another._has_value) {
-                    _value = another._value;
-                }
-                else if (_has_value && !another._has_value) {
-                    std::destroy_at(&_value);
-                    _has_value = false;
-                }
-                else if (!_has_value && another._has_value) {
-                    std::construct_at(&_value, another._value);
-                    _has_value = true;
-                }
-                return *this;
-            }
-            constexpr any_caster& operator=(any_caster&& another) {
-                if (this == &another) return *this;
-                if (_has_value && another._has_value) {
-                    _value = std::move(another._value);
-                }
-                else if (_has_value && !another._has_value) {
-                    std::destroy_at(&_value);
-                    _has_value = false;
-                }
-                else if (!_has_value && another._has_value) {
-                    std::construct_at(&_value, std::move(another._value));
-                    _has_value = true;
-                }
-                return *this;
-            }
-            union {
-                char _dummy;
-                T _value;
-            };
-            bool _has_value;
-            constexpr ~any_caster() {
-                if (_has_value) {
-                    std::destroy_at(&_value);
-                }
-            }
-            operator T() {
-                return _value;
-            }
-            constexpr explicit operator bool() const noexcept {
-                return _has_value;
-            }
-            constexpr bool has_value() {
-                return _has_value;
-            }
-            constexpr T& operator*() {
-                return _value;
-            }
-            constexpr const T& operator*()const {
-                return _value;
-            }
-        };
+        
     }
-    using protocol_auto_unref_details::any_caster;
     template<template<class> class ...PS>
     constexpr auto protocol_call(auto&& f) {
         using protocol_auto_unref_details::has_no_protocol_v;
@@ -1603,7 +1618,7 @@ namespace meta_ios {
             has_no_protocol_v<protocols::stream_cache_t, PS...>)
         {
             
-            return[&f]<class in_stream_t, class ...Args>(in_stream_t, Args&&...args) {
+            return[&f]<class in_stream_t, class... Args>(in_stream_t, Args&&...args) {
                 using fold_result_t = fold_result<in_stream_t, protocols::stream_to_t, PS...>;
                 if constexpr (!std::is_same_v<fold_result_t, protocols::meta_stream_skip_signal>)
                 {
@@ -1613,7 +1628,7 @@ namespace meta_ios {
         }
         else
         {
-            return[&f]<class in_stream_t, class ...Args>(in_stream_t, Args&&...args) {
+            return[&f]<class in_stream_t, class... Args>(in_stream_t, Args&&...args) {
                 using fold_result_t = fold_result<in_stream_t, PS...>;
                 if constexpr(!std::is_same_v<fold_result_t, protocols::meta_stream_skip_signal>)
                 {
@@ -1628,7 +1643,6 @@ namespace meta_ios {
     constexpr auto protocol_call(auto&& f) {
         using protocol_auto_unref_details::has_no_protocol_v;
         using protocol_auto_unref_details::fold_result;
-        using protocol_auto_unref_details::any_caster;
         if constexpr (
             has_no_protocol_v<protocols::stream_to_t, PS...> &&
             has_no_protocol_v<protocols::stream_from_t, PS...> &&
@@ -1773,7 +1787,7 @@ namespace meta_pipe_node_details {
             std::size_t N,
             io_stream_transform_details::io_stream_traits::meta_istream_t is,
             io_stream_transform_details::io_stream_traits::meta_ostream_t os,
-            template<class> class...ps/*protocols*/>
+            template<class> class...ps>
         struct transfer_pipe {
             template<io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
                 template<class> class...other_ps>
@@ -1844,9 +1858,4 @@ namespace meta_pipe_node_details {
         };
         
     }
-
-    
-
-
 }
-
