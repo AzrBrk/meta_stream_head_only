@@ -846,56 +846,56 @@ namespace meta_loop {
                 >, Args...>;
                 using type = typename track_apply_t::type;
 
-                template<class ...arg_types>
-                static constexpr auto for_each(auto&& f, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...)) {
-                    using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
-                  
-                        if constexpr(std::is_same_v<return_type, void>)
-                        {
-                            if constexpr(_continue_)
-                            {
-                                std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-                            }
-                        }
-                        else {
-                            return_type ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                            if constexpr (_continue_) {
-                                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-                            }
-                            else {
-                                return ret_val;
-                            }
-                        }
+                   template<class ...arg_types>
+    static constexpr auto for_each(auto&& f, arg_types &&...args) -> decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...)) {
+        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
+
+        if constexpr (std::is_same_v<return_type, void>)
+        {
+            if constexpr (_continue_)
+            {
+                std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+            }
+        }
+        else {
+            return_type ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+            if constexpr (track_apply_t::_continue_) {
+                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+            }
+            else {
+                return ret_val;
+            }
+        }
+    }
+
+
+    template<class first_arg_type, class ...arg_types>
+    static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first))) {
+        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
+        if constexpr (std::is_same_v<return_type, void>)
+        {
+            if constexpr (_continue_) {
+                std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                if constexpr (sizeof ...(arg_types))
+                {
+                    return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
                 }
+            }
+        }
+        else {
+            auto ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+            if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
+                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+            }
+            else {
+                return ret_val;
+            }
 
-                template<class first_arg_type, class ...arg_types>
-                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first))) {
-                    using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
-                    if constexpr (std::is_same_v<return_type, void>)
-                    {
-                        if constexpr (_continue_) {
-                            std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                            if constexpr (sizeof ...(arg_types))
-                            {
-                                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
-                            }
-
-                        }
-                    }
-                    else {
-                        return_type ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                        if constexpr (_continue_ && sizeof ...(arg_types)) {
-                            return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
-                        }
-                        else {
-                            return ret_val;
-                        }
-
-                    }
-                   
-                }
-            };
+        }
+       
+    }
+};
         };
 
 
@@ -903,15 +903,6 @@ namespace meta_loop {
         {
             static constexpr bool _continue_ = false;
             using type = typename MO::type;
-            template<class ...arg_types>
-            static constexpr decltype(auto) for_each(auto&& f, arg_types &&...args) {
-                return std::invoke(f, typename MO::type{}, std::forward<arg_types>(args)...);
-            }
-            template<class first_arg_type, class ...arg_types>
-            static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args) {
-                return std::invoke(f, typename MO::type{}, std::forward<first_arg_type>(first));
-            }
-        };
     }
 
     template<class C, class O, class G, class ...ARG_Tys>
