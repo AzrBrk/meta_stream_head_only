@@ -151,7 +151,7 @@ namespace exp_utilities
         struct function_info;
 
         template<class R, class ...Args>
-        struct function_info<R(Args...)> {
+        struct function_info<R(*)(Args...)> {
             using return_type = R;
             using argument_types = exp_list<Args...>;
         };
