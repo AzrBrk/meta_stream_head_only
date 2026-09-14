@@ -433,6 +433,9 @@ public:
     }
 
     auto operator[](std::size_t I) {
+        if (I >= bind_index) {
+            throw std::runtime_error("Error: cannot access an argument that has not been bound yet.");
+        }
         return args_stack[I];
     }
     template<class ...Args>
