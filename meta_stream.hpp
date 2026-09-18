@@ -1698,14 +1698,14 @@ namespace meta_ios {
             void destroy(std::byte* ptr) {
                 std::destroy_at(reinterpret_cast<type*>(ptr + value));
             }
-            std::byte* address_of(std::byte* base_ptr) {
+            std::byte* address_of(std::byte* base_ptr)const {
                 return base_ptr + value;
             }
             type& get(std::byte* ptr) {
                 return *reinterpret_cast<type*>(ptr + value);
             }
-            type const& c_get(std::byte* ptr) {
-                return *reinterpret_cast<type*>(ptr + value);
+            type const& c_get(const std::byte* ptr)const {
+                return *reinterpret_cast<const type*>(ptr + value);
             }
         };
         struct advance_f {
@@ -1754,14 +1754,14 @@ namespace meta_pipe_node_details {
             meta_invoke<invoke_if<(exp_size<typename this_pipe::from::type> > 0)>,typename this_pipe::from>
         >;
 
-        
-        template<class meta_function_type, typename reset_t>
+        using meta_nothing = meta_objects::meta_empty_o;
+        template<class meta_function_type, typename reset_f>
         struct skip_advance_node {
             template<class this_pipe>
             struct advance_impl {
                 using stream_invoke = meta_all_transfer<
-                    std::conditional_t<!std::is_same_v<reset_t, void>,
-                    typename this_pipe::to::template meta_set<reset_t>, 
+                    std::conditional_t<!std::is_same_v<reset_f, meta_nothing>,
+                    typename this_pipe::to::template meta_set<meta_invoke<reset_f, typename this_pipe>>, 
                     typename this_pipe::to
                     >,
                     typename this_pipe::from, meta_function_type>;
@@ -1775,11 +1775,11 @@ namespace meta_pipe_node_details {
         template<
             io_stream_transform_details::io_stream_traits::meta_istream_t is,
             io_stream_transform_details::io_stream_traits::meta_ostream_t os,
-            class break_f, class reset_t,
+            class break_f, class reset_f,
             template<class> class...ps>
         using skip_stream_istream = meta_ret_object<
             skip_node<meta_all_transfer<os, is, break_f>>,
-            skip_advance_node<break_f, reset_t>,
+            skip_advance_node<break_f, reset_f>,
             ret_from_node<ps...>
         >;
 
@@ -1797,7 +1797,7 @@ namespace meta_pipe_node_details {
             template<io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
                 template<class> class...other_ps>
             using each_to = transfer_pipe<
-                exp_size<typename is::type>, stream_istream<is, os, ps...>, another_os, protocols::forward_last, other_ps...
+                exp_size<typename is::type>, stream_istream<is, os, protocols::forward_last, ps...>, another_os,  other_ps...
             >;
 
             template<
@@ -1811,10 +1811,10 @@ namespace meta_pipe_node_details {
             template<
                 std::size_t Nc,
                 io_stream_transform_details::io_stream_traits::meta_ostream_t another_os,
-                class break_f, typename reset_t,
+                class break_f, typename reset_f,
                 template<class> class...other_ps>
             using skip_to = transfer_pipe<
-                Nc, skip_stream_istream<is, os, break_f, reset_t, ps...>, another_os, other_ps...
+                Nc, skip_stream_istream<is, os, break_f, reset_f, ps...>, another_os, other_ps...
             >;
             using from = stream_istream<is, os, ps...>;
             using transfer = meta_ios::transfer<N, os, is>;
@@ -1837,22 +1837,17 @@ namespace meta_pipe_node_details {
             using all_to = transfer_pipe<
                 exp_size<typename is::type>, is, another_os, other_ps...
             >;
-            template<meta_ostream_t another_os,
-                template<class> class...other_ps>
-            using each_to = transfer_pipe<
-                exp_size<typename is::type>, is, another_os, other_ps...,protocols::forward_last
-            >;
-
+            
             template<std::size_t Nc, meta_ostream_t another_os,
                 template<class> class...other_ps>
             using to = transfer_pipe<
                 Nc, is, another_os, other_ps...
             >;
             
-            template<meta_ostream_t another_os, class break_f, class reset_t,
+            template<meta_ostream_t another_os, class break_f, class reset_f,
                 template<class> class...other_ps>
             using skip_to = pipe::transfer<
-                skip_stream_istream<is, another_os, break_f, reset_t, other_ps...>
+                skip_stream_istream<is, another_os, break_f, reset_f, other_ps...>
             >;
 
         };
