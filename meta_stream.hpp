@@ -1761,7 +1761,7 @@ namespace meta_pipe_node_details {
             struct advance_impl {
                 using stream_invoke = meta_all_transfer<
                     std::conditional_t<!std::is_same_v<reset_f, meta_nothing>,
-                    typename this_pipe::to::template meta_set<meta_invoke<reset_f, typename this_pipe>>, 
+                    typename this_pipe::to::template meta_set<meta_invoke<reset_f, this_pipe>>, 
                     typename this_pipe::to
                     >,
                     typename this_pipe::from, meta_function_type>;
