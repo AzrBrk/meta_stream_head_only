@@ -1675,25 +1675,20 @@ namespace meta_ios {
         }
     }
     namespace meta_aligned_iterator_details {
-        template<class from_ins>
-        struct seek_to_v {
-            template<class addr_type>
-            struct apply {
-                static constexpr bool value = !static_cast<bool>(addr_type::value % alignof(from_ins));
-            };
-        };
         template<std::size_t start, class from_ins>
         struct seek_to {
-            using seek_t = typename transfer_until<
-                meta_iterator::template meta_set<std::integral_constant<std::size_t, start>>,
-                meta_index_istream<start>,
-                protocols::only_stream_to_unref<seek_to_v<from_ins>>
-            >::to_t;
-            using advance_t = std::integral_constant<std::size_t, seek_t::value + sizeof(from_ins)>;
+            static constexpr std::size_t align = alignof(from_ins);
+            // O(1): round start up to the next multiple of align.
+            // alignof is always a power of 2, so this bit math replaces the
+            // old per-byte scan via transfer_until + index_istream.
+            static constexpr std::size_t value = (start + align - 1) & ~(align - 1);
+            using advance_t = std::integral_constant<std::size_t, value + sizeof(from_ins)>;
             using type = from_ins;
-            static constexpr std::size_t value = seek_t::value;
             void emplace(std::byte* ptr, type const& val) {
                 new(ptr + value) type{ val };
+            }
+            void emplace(std::byte* ptr, type&& val) {
+                new(ptr + value) type{ std::move(val) };
             }
             void destroy(std::byte* ptr) {
                 std::destroy_at(reinterpret_cast<type*>(ptr + value));
