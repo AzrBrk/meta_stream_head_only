@@ -1719,6 +1719,29 @@ namespace meta_ios {
     /// for meta_aligned_iterator, it is a meta_ostream_t that can seek to an aligned address for a specific type in a byte stream, and it can also advance to the next aligned address for the next type.  
     /// </summary>
     using meta_aligned_iterator = meta_object_init<meta_aligned_iterator_details::advance_f>;
+    /// Reflection adapter: reflect a struct's non-static data members into an
+    /// exp_list of their types, ready to feed meta_istream.
+    /// Requires C++26 static reflection (GCC 16+, -std=c++26 -freflection).
+#if defined(__cpp_impl_reflection) && __cpp_impl_reflection >= 202506L
+// GCC 16.2 workaround: <meta> must be included (by the user, or here) after basic headers.
+#include <meta>
+    namespace reflection_detail {
+        template<::std::meta::info M>
+        using member_type = [: ::std::meta::type_of(M) :];
+    }
+    template<class T,
+             auto Ctx = ::std::meta::access_context::unprivileged()>
+    struct reflected_member_types {
+        static constexpr auto members =
+            ::std::define_static_array(
+                ::std::meta::nonstatic_data_members_of(^^T, Ctx));
+        template<std::size_t... Is>
+        static constexpr auto make(std::index_sequence<Is...>) {
+            return exp_list<reflection_detail::member_type<members[Is]>...>{};
+        }
+        using type = decltype(make(std::make_index_sequence<members.size()>{}));
+    };
+#endif
 
 namespace meta_pipe_node_details {
     struct advance_node {
