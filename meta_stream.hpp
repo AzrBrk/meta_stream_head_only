@@ -1,5 +1,6 @@
 #include<type_traits>
 #include<concepts>
+#include<limits>
 #include<utility>
 #include<array>
 #include<functional>
@@ -792,6 +793,97 @@ namespace meta_objects {
     template<class F, class Ret> requires has_initializer<F>
     using meta_ret_init = meta_ret_object<meta_objects_details::meta_empty, F, Ret>;
 
+    namespace meta_states_details {
+        template<bool Changed, std::uint64_t Flags, std::size_t Index>
+        struct next_flags {
+            static constexpr std::uint64_t value = Flags;
+        };
+
+        template<std::uint64_t Flags, std::size_t Index>
+        struct next_flags<true, Flags, Index> {
+            static_assert(Index < std::numeric_limits<std::uint64_t>::digits);
+            static constexpr std::uint64_t value = Flags | (std::uint64_t{1} << Index);
+        };
+    }
+
+    template<class OBJ, class F, class Changed_Pred,
+        std::uint64_t byte_flag = 0, std::size_t flag_index = 0>
+    requires is_meta_function_v<F> && is_meta_function_v<Changed_Pred>
+    struct meta_states_object {
+        using type = OBJ;
+        using function = F;
+        using changed_pred = Changed_Pred;
+
+        static constexpr std::uint64_t flags = byte_flag;
+        static constexpr std::size_t size = flag_index;
+        static constexpr bool last_changed =
+            flag_index != 0 && ((byte_flag >> (flag_index - 1)) & std::uint64_t{1}) != 0;
+
+        template<class ANOTHER_OBJ>
+        using meta_set = meta_states_object<
+            ANOTHER_OBJ, F, Changed_Pred, byte_flag, flag_index>;
+
+        template<std::size_t I>
+            requires (I < flag_index && I < std::numeric_limits<std::uint64_t>::digits)
+        static constexpr bool at() noexcept {
+            return ((byte_flag >> I) & std::uint64_t{1}) != 0;
+        }
+
+        template<class FromIs>
+        using changed = meta_invoke<Changed_Pred, OBJ, FromIs>;
+
+        template<class FromIs>
+        using next_type = meta_invoke<F, OBJ, FromIs>;
+
+        template<class FromIs>
+        using apply = meta_states_object<
+            next_type<FromIs>, F, Changed_Pred,
+            meta_states_details::next_flags<
+                changed<FromIs>::value, byte_flag, flag_index>::value,
+            flag_index + 1>;
+    };
+
+    namespace meta_states_details {
+        template<class T>
+        consteval bool changed_value() {
+            if constexpr (requires { T::last_changed; }) {
+                return T::last_changed;
+            }
+            return true;
+        }
+
+        template<class Stage>
+        consteval bool output_changed() {
+            if constexpr (requires { typename Stage::to; }) {
+                return changed_value<typename Stage::to>();
+            }
+            return changed_value<Stage>();
+        }
+
+        template<class Stage>
+        consteval bool input_changed() {
+            if constexpr (requires { typename Stage::from::type; }) {
+                return changed_value<typename Stage::from::type>();
+            }
+            return changed_value<Stage>();
+        }
+    }
+
+    struct observe_stream {
+        template<class>
+        using apply = std::true_type;
+    };
+
+    struct observe_ostream {
+        template<class Stage>
+        using apply = std::bool_constant<meta_states_details::output_changed<Stage>()>;
+    };
+
+    struct observe_istream {
+        template<class Stage>
+        using apply = std::bool_constant<meta_states_details::input_changed<Stage>()>;
+    };
+
 
     namespace meta_timer_object_details {
         struct meta_break_signal :std::false_type {};
@@ -924,7 +1016,9 @@ namespace meta_loop {
  
     //Note: All template parameters are meta objects
     namespace meta_looper_detail {
-        template<bool, class Condition, class OBJ, class Generator = meta_empty_o>
+        template<bool, class Condition, class OBJ,
+            class Generator = meta_empty_o,
+            class Observer = observe_stream>
         struct meta_looper_impl
         {
 
@@ -940,13 +1034,15 @@ namespace meta_loop {
 
                 //invoke Obj object if condition is true
                 using result_stage_o = meta_invoke<invoke_object_if<_continue_>, OBJ, generator_stage_o>;
+                using observe_result = meta_invoke<Observer, typename result_stage_o::type>;
 
                 //recursively loop for result
                 using track_apply_t = meta_invoke<invoke_if<_continue_>, meta_looper_impl<
                     _continue_,
                     Condition,
                     result_stage_o,
-                    generator_stage_o
+                    generator_stage_o,
+                    Observer
                 >, Args...>;
                 using type = typename track_apply_t::type;
 
@@ -958,12 +1054,19 @@ namespace meta_loop {
                     {
                         if constexpr (_continue_)
                         {
-                            std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                            if constexpr (observe_result::value)
+                            {
+                                std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                            }
                             return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
                         }
                     }
                     else {
-                        return_type ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                        return_type ret_val{};
+                        if constexpr (observe_result::value)
+                        {
+                            ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                        }
                         if constexpr (track_apply_t::_continue_) {
                             return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
                         }
@@ -980,7 +1083,10 @@ namespace meta_loop {
                     if constexpr (std::is_same_v<return_type, void>)
                     {
                         if constexpr (_continue_) {
-                            std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                            if constexpr (observe_result::value)
+                            {
+                                std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                            }
                             if constexpr (sizeof ...(arg_types))
                             {
                                 return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
@@ -988,7 +1094,16 @@ namespace meta_loop {
                         }
                     }
                     else {
-                        auto ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                        auto ret_val = [&] {
+                            if constexpr (observe_result::value)
+                            {
+                                return std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                            }
+                            else
+                            {
+                                return return_type{};
+                            }
+                        }();
                         if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
                             return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
                         }
@@ -1003,18 +1118,19 @@ namespace meta_loop {
         };
 
 
-        template<class Cond, class MO, class Generator> struct meta_looper_impl<false, Cond, MO, Generator>
+        template<class Cond, class MO, class Generator, class Observer>
+        struct meta_looper_impl<false, Cond, MO, Generator, Observer>
         {
             static constexpr bool _continue_ = false;
             using type = typename MO::type;
         };
     }
 
-    template<class C, class O, class G, class ...ARG_Tys>
-    using meta_looper_t = typename meta_invoke<meta_looper_detail::meta_looper_impl<true, C, O, G>, ARG_Tys...>::type;
+    template<class C, class O, class G, class Observer = observe_stream, class ...ARG_Tys>
+    using meta_looper_t = typename meta_invoke<meta_looper_detail::meta_looper_impl<true, C, O, G, Observer>, ARG_Tys...>::type;
 
-    template<class C, class O, class G = meta_empty_o>
-    using meta_looper = meta_looper_detail::meta_looper_impl<true, C, O, G>;
+    template<class C, class O, class G = meta_empty_o, class Observer = observe_stream>
+    using meta_looper = meta_looper_detail::meta_looper_impl<true, C, O, G, Observer>;
 }
 
 namespace meta_ios {
@@ -1315,6 +1431,10 @@ namespace meta_ios {
             struct is_meta_object<meta_object<OBJ, F>> : std::true_type {};
             template<class OBJ, class F, class Ret>
             struct is_meta_object<meta_ret_object<OBJ, F, Ret>> : std::true_type {};
+            template<class OBJ, class F, class Changed_Pred,
+                std::uint64_t byte_flag, std::size_t flag_index>
+            struct is_meta_object<meta_states_object<OBJ, F, Changed_Pred, byte_flag, flag_index>>
+                : std::true_type {};
 
             template<class T> constexpr bool is_meta_object_v = is_meta_object<T>::value;
 
@@ -1478,38 +1598,46 @@ namespace meta_ios {
     template<class T>
     concept meta_ostream_t = io_stream_transform_details::io_stream_traits::meta_ostream_t<T>;
 
+    using meta_range_continue = io_stream_transform_details::meta_always_false_c_o;
+
     template<meta_ostream_t To,
         meta_istream_t From,
         class BF,
-        class SkipF>
+        class SkipF,
+        class Observer = observe_stream>
     using meta_transfer_until_impl = meta_invoke<
         meta_looper<
             io_stream_transform_details::meta_transfer_until_condition_o<BF>,
             io_stream_transform_details::meta_transfer_until_o<To, From, SkipF>,
-            meta_empty_o>>;
+            meta_empty_o,
+            Observer>>;
 
     template<meta_ostream_t To,
         meta_istream_t From,
-        class BF = io_stream_transform_details::meta_always_false_c_o>
+        class BF = meta_range_continue,
+        class Observer = observe_stream>
     using meta_transfer_until = meta_transfer_until_impl<
-        To, From, BF, io_stream_transform_details::meta_always_false_c_o>;
+        To, From, BF, meta_range_continue, Observer>;
 
     template<meta_ostream_t To,
         meta_istream_t From,
         class SkipF,
-        class BF = io_stream_transform_details::meta_always_false_c_o>
-    using meta_transfer_until_skip = meta_transfer_until_impl<To, From, BF, SkipF>;
+        class BF = meta_range_continue,
+        class Observer = observe_stream>
+    using meta_transfer_until_skip = meta_transfer_until_impl<To, From, BF, SkipF, Observer>;
 
     template<meta_ostream_t To,
         meta_istream_t From,
-        class break_f = io_stream_transform_details::meta_always_false_c_o>
-    using transfer_until = typename meta_transfer_until<To, From, break_f>::type;
+        class break_f = meta_range_continue,
+        class Observer = observe_stream>
+    using transfer_until = typename meta_transfer_until<To, From, break_f, Observer>::type;
 
     template<meta_ostream_t To,
         meta_istream_t From,
         class skip_f,
-        class break_f = io_stream_transform_details::meta_always_false_c_o>
-    using transfer_until_skip = typename meta_transfer_until_skip<To, From, skip_f, break_f>::type;
+        class break_f = meta_range_continue,
+        class Observer = observe_stream>
+    using transfer_until_skip = typename meta_transfer_until_skip<To, From, skip_f, break_f, Observer>::type;
 
     //convert meta_stream into a timed meta_object
     template<std::size_t Transfer_Length,
