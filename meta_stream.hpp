@@ -1,4 +1,5 @@
 #include<type_traits>
+#include<concepts>
 #include<utility>
 #include<array>
 #include<functional>
@@ -778,8 +779,9 @@ namespace meta_objects {
     template<class OBJ, class F, class Ret> requires has_initializer<F>
     struct meta_ret_object<OBJ, F, Ret>
     {
-        using ret = meta_invoke<Ret, OBJ>;
-        using type = typename initialize<F, OBJ>::type;
+        using initialized_type = typename initialize<F, OBJ>::type;
+        using ret = meta_invoke<Ret, initialized_type>;
+        using type = initialized_type;
         template<class ...Arg>
         using apply = meta_ret_object<typename initialize<F, OBJ, Arg...>::type, initialized<F>, Ret>;
 
@@ -1016,6 +1018,12 @@ namespace meta_loop {
 }
 
 namespace meta_ios {
+    template<bool End, class EndType = exp_utilities::literal_types::end_of_list>
+    struct end_of_stream {
+        static constexpr bool end = End;
+        using end_type = EndType;
+    };
+
     using namespace meta_invoke_protocols;
     using namespace meta_objects;
     namespace io_stream_transform_details {
@@ -1326,6 +1334,28 @@ namespace meta_ios {
 
         }
 
+        template<class T>
+        concept has_end_state = requires {
+            { T::end } -> std::convertible_to<bool>;
+            typename T::end_type;
+        };
+
+        template<class T>
+        concept is_end_stream = has_end_state<T> && T::end;
+
+        template<class From, bool = is_end_stream<typename From::type>>
+        struct stream_cache;
+
+        template<class From>
+        struct stream_cache<From, false> {
+            using type = typename From::ret;
+        };
+
+        template<class From>
+        struct stream_cache<From, true> {
+            using type = typename From::type::end_type;
+        };
+
 #include<typeinfo>
         
         template<io_stream_traits::meta_ostream_t To, io_stream_traits::meta_istream_t From> struct meta_stream
@@ -1334,7 +1364,7 @@ namespace meta_ios {
             using to = To;
             using from_t = typename from::type;
             using to_t = typename to::type;
-            using cache = typename From::ret;
+            using cache = typename stream_cache<From>::type;
 
             template<class ...Arg>
             using invoke_to = meta_stream<meta_invoke<To, Arg...>, from>;
@@ -1383,26 +1413,56 @@ namespace meta_ios {
         struct meta_transfer_until_condition {
             template<class this_stream, class ...>
             struct apply {
-                static constexpr bool value =
-                    (!std::is_same_v<typename this_stream::cache, literal_types::end_of_list>) &&
-                    (!meta_invoke<BF, this_stream>::value);
+                static constexpr bool value = [] {
+                    if constexpr (
+                        is_end_stream<typename this_stream::from_t> ||
+                        std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        return !meta_invoke<BF, this_stream>::value;
+                    }
+                }();
             };
         };
 
                 template<class BF>
                 using meta_transfer_until_condition_o = meta_object<void, meta_transfer_until_condition<BF>>;
 
+        template<class SkipF>
         struct meta_transfer_until_update {
             template<class this_stream, class ...>
-            using apply = meta_stream<
-                meta_object_invoke<typename this_stream::to, typename this_stream::from>,
-                meta_invoke<typename this_stream::from>>;
+            struct apply_impl {
+                static constexpr bool skip = [] {
+                    if constexpr (
+                        is_end_stream<typename this_stream::from_t> ||
+                        std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        return meta_invoke<SkipF, this_stream>::value;
+                    }
+                }();
+
+                using type = meta_stream<
+                    meta_invoke<invoke_object_if<!skip>,
+                        typename this_stream::to,
+                        typename this_stream::from>,
+                    meta_invoke<typename this_stream::from>>;
+            };
+
+            template<class this_stream, class ...Args>
+            using apply = typename apply_impl<this_stream, Args...>::type;
         };
 
-        template<class To, class From>
+        template<class To, class From, class SkipF>
         using meta_transfer_until_o = meta_object<
             meta_stream<To, From>,
-            meta_transfer_until_update>;
+            meta_transfer_until_update<SkipF>>;
         
         struct meta_stream_always_continue {
             template<class in_stream_t>
@@ -1420,17 +1480,36 @@ namespace meta_ios {
 
     template<meta_ostream_t To,
         meta_istream_t From,
-        class BF = io_stream_transform_details::meta_always_false_c_o>
-    using meta_transfer_until = meta_invoke<
+        class BF,
+        class SkipF>
+    using meta_transfer_until_impl = meta_invoke<
         meta_looper<
             io_stream_transform_details::meta_transfer_until_condition_o<BF>,
-            io_stream_transform_details::meta_transfer_until_o<To, From>,
+            io_stream_transform_details::meta_transfer_until_o<To, From, SkipF>,
             meta_empty_o>>;
+
+    template<meta_ostream_t To,
+        meta_istream_t From,
+        class BF = io_stream_transform_details::meta_always_false_c_o>
+    using meta_transfer_until = meta_transfer_until_impl<
+        To, From, BF, io_stream_transform_details::meta_always_false_c_o>;
+
+    template<meta_ostream_t To,
+        meta_istream_t From,
+        class SkipF,
+        class BF = io_stream_transform_details::meta_always_false_c_o>
+    using meta_transfer_until_skip = meta_transfer_until_impl<To, From, BF, SkipF>;
 
     template<meta_ostream_t To,
         meta_istream_t From,
         class break_f = io_stream_transform_details::meta_always_false_c_o>
     using transfer_until = typename meta_transfer_until<To, From, break_f>::type;
+
+    template<meta_ostream_t To,
+        meta_istream_t From,
+        class skip_f,
+        class break_f = io_stream_transform_details::meta_always_false_c_o>
+    using transfer_until_skip = typename meta_transfer_until_skip<To, From, skip_f, break_f>::type;
 
     //convert meta_stream into a timed meta_object
     template<std::size_t Transfer_Length,
