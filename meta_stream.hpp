@@ -41,7 +41,7 @@ namespace exp_utilities
         template<int I, template<class...> class TL>
         struct select_type<I, TL<>> {
             using type = literal_types::no_exist_type;
-            static_assert(false, "Index out of bounds for exp_select");
+            static_assert(I == -1, "Index out of bounds for exp_select");
         };
     }
 
@@ -474,7 +474,7 @@ namespace exp_utilities
 
     template<class TL>
     struct to_meta_array {
-        static_assert(false, "not all elements has value");
+        static_assert(sizeof(TL) == 0, "not all elements has value");
     };
 
     template<template<class...> class integer_wrapper, std::size_t ...elements>
@@ -804,6 +804,61 @@ namespace meta_objects {
             static_assert(Index < std::numeric_limits<std::uint64_t>::digits);
             static constexpr std::uint64_t value = Flags | (std::uint64_t{1} << Index);
         };
+
+        //detect whether F defines on_changed<Obj, FromIs>
+        template<class F, class Obj, class FromIs, class = void>
+        struct has_on_changed : std::false_type {};
+
+        template<class F, class Obj, class FromIs>
+        struct has_on_changed<F, Obj, FromIs,
+            std::void_t<typename F::template on_changed<Obj, FromIs>>>
+            : std::true_type {};
+
+        //detect whether F::apply accepts a third bool_constant parameter
+        template<class F, class Obj, class FromIs, bool Changed, class = void>
+        struct apply_accepts_bool : std::false_type {};
+
+        template<class F, class Obj, class FromIs, bool Changed>
+        struct apply_accepts_bool<F, Obj, FromIs, Changed,
+            std::void_t<typename F::template apply<Obj, FromIs, std::bool_constant<Changed>>>>
+            : std::true_type {};
+
+        //choose which way to call F: on_changed (bool fallback), 3-arg apply, or 2-arg
+        template<bool UseOnChanged, bool PassBool,
+            class F, class Obj, class FromIs, bool Changed>
+        struct next_type_chooser;
+
+        //case 1: on_changed exists and changed -> call on_changed
+        template<class F, class Obj, class FromIs, bool Changed>
+        struct next_type_chooser<true, true, F, Obj, FromIs, Changed> {
+            using type = typename F::template on_changed<Obj, FromIs>;
+        };
+        template<class F, class Obj, class FromIs, bool Changed>
+        struct next_type_chooser<true, false, F, Obj, FromIs, Changed> {
+            using type = typename F::template on_changed<Obj, FromIs>;
+        };
+
+        //case 2: no on_changed, but apply takes a bool
+        template<class F, class Obj, class FromIs, bool Changed>
+        struct next_type_chooser<false, true, F, Obj, FromIs, Changed> {
+            using type = typename F::template apply<Obj, FromIs, std::bool_constant<Changed>>;
+        };
+
+        //case 3: plain 2-arg apply
+        template<class F, class Obj, class FromIs, bool Changed>
+        struct next_type_chooser<false, false, F, Obj, FromIs, Changed> {
+            using type = typename F::template apply<Obj, FromIs>;
+        };
+
+        template<class F, class Obj, class FromIs, bool Changed>
+        struct compute_next_type {
+            static constexpr bool use_on_changed =
+                has_on_changed<F, Obj, FromIs>::value && Changed;
+            static constexpr bool pass_bool =
+                apply_accepts_bool<F, Obj, FromIs, Changed>::value;
+            using type = typename next_type_chooser<
+                use_on_changed, pass_bool, F, Obj, FromIs, Changed>::type;
+        };
     }
 
     template<class OBJ, class F, class Changed_Pred,
@@ -833,7 +888,8 @@ namespace meta_objects {
         using changed = meta_invoke<Changed_Pred, OBJ, FromIs>;
 
         template<class FromIs>
-        using next_type = meta_invoke<F, OBJ, FromIs>;
+        using next_type = typename meta_states_details::compute_next_type<
+            F, OBJ, FromIs, changed<FromIs>::value>::type;
 
         template<class FromIs>
         using apply = meta_states_object<
@@ -851,37 +907,11 @@ namespace meta_objects {
             }
             return true;
         }
-
-        template<class Stage>
-        consteval bool output_changed() {
-            if constexpr (requires { typename Stage::to; }) {
-                return changed_value<typename Stage::to>();
-            }
-            return changed_value<Stage>();
-        }
-
-        template<class Stage>
-        consteval bool input_changed() {
-            if constexpr (requires { typename Stage::from::type; }) {
-                return changed_value<typename Stage::from::type>();
-            }
-            return changed_value<Stage>();
-        }
     }
 
     struct observe_stream {
-        template<class>
-        using apply = std::true_type;
-    };
-
-    struct observe_ostream {
         template<class Stage>
-        using apply = std::bool_constant<meta_states_details::output_changed<Stage>()>;
-    };
-
-    struct observe_istream {
-        template<class Stage>
-        using apply = std::bool_constant<meta_states_details::input_changed<Stage>()>;
+        using apply = std::bool_constant<meta_states_details::changed_value<Stage>()>;
     };
 
 
@@ -1034,7 +1064,7 @@ namespace meta_loop {
 
                 //invoke Obj object if condition is true
                 using result_stage_o = meta_invoke<invoke_object_if<_continue_>, OBJ, generator_stage_o>;
-                using observe_result = meta_invoke<Observer, typename result_stage_o::type>;
+                using observe_result = meta_invoke<Observer, result_stage_o>;
 
                 //recursively loop for result
                 using track_apply_t = meta_invoke<invoke_if<_continue_>, meta_looper_impl<
@@ -1047,72 +1077,71 @@ namespace meta_loop {
                 using type = typename track_apply_t::type;
 
                 template<class ...arg_types>
-                static constexpr auto for_each(auto&& f, arg_types &&...args) -> decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...)) {
-                    using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
+                static constexpr auto for_each(auto&& f, arg_types &&...args) {
+                    if constexpr (!observe_result::value) {
+                        //stage unchanged: never instantiate f, just recurse
+                        if constexpr (_continue_) {
+                            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+                        }
+                    } else {
+                        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
 
-                    if constexpr (std::is_same_v<return_type, void>)
-                    {
-                        if constexpr (_continue_)
+                        if constexpr (std::is_same_v<return_type, void>)
                         {
-                            if constexpr (observe_result::value)
+                            if constexpr (_continue_)
                             {
                                 std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
                             }
-                            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-                        }
-                    }
-                    else {
-                        return_type ret_val{};
-                        if constexpr (observe_result::value)
-                        {
-                            ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                        }
-                        if constexpr (track_apply_t::_continue_) {
-                            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
                         }
                         else {
-                            return ret_val;
+                            return_type ret_val{};
+                            if constexpr (_continue_) {
+                                ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
+                                if constexpr (track_apply_t::_continue_) {
+                                    return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+                                }
+                                else {
+                                    return ret_val;
+                                }
+                            }
                         }
                     }
                 }
 
 
                 template<class first_arg_type, class ...arg_types>
-                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args)->decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first))) {
-                    using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
-                    if constexpr (std::is_same_v<return_type, void>)
-                    {
+                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args) {
+                    if constexpr (!observe_result::value) {
                         if constexpr (_continue_) {
-                            if constexpr (observe_result::value)
-                            {
-                                std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                            }
-                            if constexpr (sizeof ...(arg_types))
-                            {
+                            if constexpr (sizeof ...(arg_types)) {
                                 return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
                             }
                         }
-                    }
-                    else {
-                        auto ret_val = [&] {
-                            if constexpr (observe_result::value)
-                            {
-                                return std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                    } else {
+                        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
+                        if constexpr (std::is_same_v<return_type, void>)
+                        {
+                            if constexpr (_continue_) {
+                                std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                                if constexpr (sizeof ...(arg_types))
+                                {
+                                    return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+                                }
                             }
-                            else
-                            {
-                                return return_type{};
-                            }
-                        }();
-                        if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
-                            return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
                         }
                         else {
-                            return ret_val;
+                            auto ret_val = [&] {
+                                return std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
+                            }();
+                            if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
+                                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+                            }
+                            else {
+                                return ret_val;
+                            }
                         }
-
                     }
-                   
                 }
             };
         };
@@ -1142,6 +1171,115 @@ namespace meta_ios {
 
     using namespace meta_invoke_protocols;
     using namespace meta_objects;
+
+    //=== stream-specific observe helpers ===
+    namespace stream_observe_details {
+        template<class Stage>
+        consteval bool output_changed() {
+            if constexpr (requires { typename Stage::type::to; }) {
+                return meta_states_details::changed_value<typename Stage::type::to>();
+            } else if constexpr (requires { typename Stage::to; }) {
+                return meta_states_details::changed_value<typename Stage::to>();
+            }
+            return meta_states_details::changed_value<Stage>();
+        }
+
+        template<class Stage>
+        consteval bool input_changed() {
+            if constexpr (requires { typename Stage::type::from::type; }) {
+                return meta_states_details::changed_value<typename Stage::type::from::type>();
+            } else if constexpr (requires { typename Stage::from::type; }) {
+                return meta_states_details::changed_value<typename Stage::from::type>();
+            }
+            return meta_states_details::changed_value<Stage>();
+        }
+
+        //preview what next stream would be if F is applied.
+        //uses plain 2-arg apply; if F also accepts a bool_constant as 3rd arg,
+        //pass std::false_type for the preview.
+        template<class F, class Current, class FromIs, class = void>
+        struct preview_next {
+            using type = meta_invoke<F, Current, FromIs>;
+        };
+
+        template<class F, class Current, class FromIs>
+        struct preview_next<F, Current, FromIs,
+            std::void_t<typename F::template apply<Current, FromIs, std::false_type>>> {
+            using type = typename F::template apply<Current, FromIs, std::false_type>;
+        };
+    }
+
+    struct observe_ostream {
+        template<class Stage>
+        using apply = std::bool_constant<stream_observe_details::output_changed<Stage>()>;
+    };
+
+    struct observe_istream {
+        template<class Stage>
+        using apply = std::bool_constant<stream_observe_details::input_changed<Stage>()>;
+    };
+
+    //=== ChangedPred predicates for meta_stream_s_o ===
+    //If to is itself a meta_states_object, read its state directly — no preview/compare.
+    //Otherwise preview F and compare current vs next.
+    namespace observe_details {
+        template<class To, class Cache, class = void>
+        struct to_changed : std::false_type {};
+
+        template<class To, class Cache>
+        struct to_changed<To, Cache, std::void_t<typename To::changed_pred>> {
+            static constexpr bool value = To::template changed<Cache>::value;
+        };
+    }
+
+    template<class F>
+    struct observe_os_change {
+        template<class ThisObj, class FromIs>
+        struct apply {
+            using cache_t = typename ThisObj::cache;
+            static constexpr bool value = [] {
+                if constexpr (observe_details::to_changed<typename ThisObj::to, cache_t>::value)
+                    return true;
+                else {
+                    using next_t = typename stream_observe_details::preview_next<F, ThisObj, FromIs>::type;
+                    return !std::is_same_v<typename ThisObj::to::type, typename next_t::to::type>;
+                }
+            }();
+        };
+    };
+
+    template<class F>
+    struct observe_is_change {
+        template<class ThisObj, class FromIs>
+        struct apply {
+            using next_t = typename stream_observe_details::preview_next<F, ThisObj, FromIs>::type;
+            static constexpr bool value = !std::is_same_v<
+                typename ThisObj::from::type, typename next_t::from::type>;
+        };
+    };
+
+    template<class F>
+    struct observe_cache_change {
+        template<class ThisObj, class FromIs>
+        struct apply {
+            using next_t = typename stream_observe_details::preview_next<F, ThisObj, FromIs>::type;
+            static constexpr bool value = !std::is_same_v<
+                typename ThisObj::cache, typename next_t::cache>;
+        };
+    };
+
+    template<class F>
+    struct observe_whole_change {
+        template<class ThisObj, class FromIs>
+        struct apply {
+            using next_t = typename stream_observe_details::preview_next<F, ThisObj, FromIs>::type;
+            static constexpr bool value =
+                !std::is_same_v<typename ThisObj::to::type, typename next_t::to::type> ||
+                !std::is_same_v<typename ThisObj::from::type, typename next_t::from::type> ||
+                !std::is_same_v<typename ThisObj::cache, typename next_t::cache>;
+        };
+    };
+
     namespace io_stream_transform_details {
         namespace transfer_protocols {
             namespace details {
@@ -1320,6 +1458,51 @@ namespace meta_ios {
 
             template<class TL, class filter>
             using filter_ostream = meta_object<TL, add_filter_f<filter>>;
+        }
+
+        //A states-based ostream: wraps a type_list inside meta_states_object.
+        //accept_pred(current_list, from_ins) == true  -> append (changed)
+        //accept_pred(current_list, from_ins) == false -> keep list unchanged (not changed)
+        //last_changed on the resulting meta_states_object tells the looper
+        //whether for_each should fire for this step.
+        namespace meta_states_ostream_detail {
+            using meta_basic_ostream_detail::add_f;
+
+            template<class accept_pred>
+            struct states_ostream_f {
+                template<class current_list, class from_ins>
+                using apply = std::conditional_t<
+                    meta_invoke<accept_pred, current_list, from_ins>::value,
+                    add_f<current_list, from_ins>,
+                    current_list
+                >;
+            };
+        }
+
+        //A states-based iterator ostream: position lives in its own OBJ state,
+        //just like meta_aligned_iterator stores advance_t in seek_to.
+        namespace meta_states_iterator_detail {
+            using meta_basic_ostream_detail::add_f;
+
+            template<std::size_t Count, class List>
+            struct iterator_state {
+                static constexpr std::size_t count = Count;
+                using list = List;
+            };
+
+            struct iterator_f {
+                template<class state, class from_ins>
+                using apply = iterator_state<
+                    state::count + 1,
+                    add_f<typename state::list,
+                        std::pair<std::integral_constant<std::size_t, state::count>, from_ins>>
+                >;
+            };
+
+            struct iterator_always_changed {
+                template<class...>
+                struct apply : std::true_type {};
+            };
         }
 
         namespace meta_index_istream_detail {
@@ -1524,6 +1707,97 @@ namespace meta_ios {
             using apply = typename meta_stream_update<mo_stream>::type;
         };
 
+        //=== operation-code bits in the high byte of to::type::opr_code ===
+        //opr_code defaults to all-ones (0xFF00000000000000): every bit "on" = normal.
+        //bit=0 triggers the special behaviour.
+        namespace stream_op_bits {
+            constexpr std::uint64_t OP_SKIP      = 1ULL << 56;  //off: skip element
+            constexpr std::uint64_t OP_OS_CLEAR = 1ULL << 57;  //off: clear ostream to empty
+            constexpr std::uint64_t OP_IS_IDLE   = 1ULL << 58;  //off: pop istream but discard
+            constexpr std::uint64_t OP_OS_IDLE  = 1ULL << 59;  //off: call ostream with empty
+            constexpr std::uint64_t OP_STACK     = 1ULL << 60;  //on: push, off: pop
+            constexpr std::uint64_t OP_TIMER_DEC = 1ULL << 62;
+            constexpr std::uint64_t OP_BREAK     = 1ULL << 63;  //off: break stream
+            constexpr std::uint64_t OP_DEFAULT   = ~std::uint64_t{0}; //all on
+
+            //short names
+            constexpr std::uint64_t opSkip     = OP_SKIP;
+            constexpr std::uint64_t opReset    = OP_OS_CLEAR;
+            constexpr std::uint64_t opCallIs   = OP_IS_IDLE;
+            constexpr std::uint64_t opCallOs   = OP_OS_IDLE;
+            constexpr std::uint64_t opBreak    = OP_BREAK;
+        }
+
+        //operator_code<bits...>: those bits are turned OFF (triggered)
+        template<std::uint64_t... Bits>
+        struct operator_code {
+            static constexpr std::uint64_t value = ~(Bits | ...);
+        };
+
+        //make_base<List, OpCode>: wraps a type_list with a static opr_code
+        template<class List, std::uint64_t OpCode = stream_op_bits::OP_DEFAULT>
+        struct make_base {
+            using type = List;
+            static constexpr std::uint64_t opr_code = OpCode;
+        };
+
+        //read opr_code from to::type, OR with runtime flags
+        template<class To, class = void>
+        struct read_op { static constexpr std::uint64_t value = stream_op_bits::OP_DEFAULT; };
+
+        template<class To>
+        struct read_op<To, std::void_t<decltype(To::type::opr_code)>> {
+            static constexpr std::uint64_t value = To::type::opr_code | To::flags;
+        };
+
+        //states-style update: specialises on meta_states_object.
+        //Reads opr_code from to::type, applies skip/clear/break bits.
+        struct meta_stream_s_f {
+        private:
+            template<class Stream, class = void>
+            struct update_impl {
+                using type = meta_stream<
+                    meta_object_invoke<typename Stream::to, typename Stream::from>,
+                    meta_invoke<typename Stream::from>>;
+            };
+
+            //To is a meta_states_object
+            template<class To, class From>
+            struct update_impl<meta_stream<To, From>, std::void_t<typename To::changed_pred>> {
+                using cache_t = typename meta_stream<To, From>::cache;
+                static constexpr std::uint64_t op = read_op<To>::value;
+                static constexpr bool skip      = !(op & stream_op_bits::OP_SKIP);
+                static constexpr bool clear_os  = !(op & stream_op_bits::OP_OS_CLEAR);
+
+                //rejected: record step, F is NOT called with cache
+                using rejected_to = meta_states_object<
+                    typename To::type,
+                    typename To::function,
+                    typename To::changed_pred,
+                    To::flags,
+                    To::size + 1>;
+
+                //cleared ostream: reset OBJ to empty list
+                using cleared_obj = exp_list<>;
+                using cleared_to = meta_states_object<
+                    cleared_obj,
+                    typename To::function,
+                    typename To::changed_pred,
+                    To::flags,
+                    To::size + 1>;
+
+                using type = meta_stream<
+                    std::conditional_t<skip, rejected_to,
+                        std::conditional_t<clear_os, cleared_to,
+                            meta_object_invoke<To, From>>>,
+                    meta_invoke<From>>;
+            };
+
+        public:
+            template<class mo_stream, class...>
+            using apply = typename update_impl<mo_stream>::type;
+        };
+
         struct meta_always_false_c_o {
             template<class>
             struct apply : std::false_type {};
@@ -1534,16 +1808,20 @@ namespace meta_ios {
             template<class this_stream, class ...>
             struct apply {
                 static constexpr bool value = [] {
-                    if constexpr (
-                        is_end_stream<typename this_stream::from_t> ||
-                        std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
-                    {
-                        return false;
+                    //op-code break bit: if to is mso and OP_BREAK is off, stop
+                    if constexpr (read_op<typename this_stream::to>::value & stream_op_bits::OP_BREAK) {
+                        if constexpr (
+                            is_end_stream<typename this_stream::from_t> ||
+                            std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
+                        {
+                            return false;
+                        }
+                        else
+                        {
+                            return !meta_invoke<BF, this_stream>::value;
+                        }
                     }
-                    else
-                    {
-                        return !meta_invoke<BF, this_stream>::value;
-                    }
+                    return false;
                 }();
             };
         };
@@ -1579,17 +1857,21 @@ namespace meta_ios {
             using apply = typename apply_impl<this_stream, Args...>::type;
         };
 
-        template<class To, class From, class SkipF>
-        using meta_transfer_until_o = meta_object<
+        template<class To, class From, class ChangedPred>
+        using meta_stream_s_o = meta_states_object<
             meta_stream<To, From>,
-            meta_transfer_until_update<SkipF>>;
-        
+            meta_stream_s_f,
+            ChangedPred>;
+
         struct meta_stream_always_continue {
             template<class in_stream_t>
             struct apply {
                 static constexpr bool value = std::is_same_v<typename in_stream_t::from::ret, literal_types::end_of_list>;
             };
         };
+
+        //default ChangedPred: mark change only when ostream (to) actually differs after update
+        using default_stream_change_pred = observe_os_change<meta_stream_s_f>;
     }
 
     template<class T>
@@ -1603,41 +1885,46 @@ namespace meta_ios {
     template<meta_ostream_t To,
         meta_istream_t From,
         class BF,
-        class SkipF,
-        class Observer = observe_stream>
+        class Observer = observe_stream,
+        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
     using meta_transfer_until_impl = meta_invoke<
         meta_looper<
             io_stream_transform_details::meta_transfer_until_condition_o<BF>,
-            io_stream_transform_details::meta_transfer_until_o<To, From, SkipF>,
+            io_stream_transform_details::meta_stream_s_o<To, From, ChangedPred>,
             meta_empty_o,
             Observer>>;
 
     template<meta_ostream_t To,
         meta_istream_t From,
         class BF = meta_range_continue,
-        class Observer = observe_stream>
+        class Observer = observe_stream,
+        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
     using meta_transfer_until = meta_transfer_until_impl<
-        To, From, BF, meta_range_continue, Observer>;
+        To, From, BF, Observer, ChangedPred>;
 
+    //legacy skip API kept for compatibility; skip logic now lives on the ostream
     template<meta_ostream_t To,
         meta_istream_t From,
         class SkipF,
         class BF = meta_range_continue,
-        class Observer = observe_stream>
-    using meta_transfer_until_skip = meta_transfer_until_impl<To, From, BF, SkipF, Observer>;
+        class Observer = observe_stream,
+        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
+    using meta_transfer_until_skip = meta_transfer_until_impl<To, From, BF, Observer, ChangedPred>;
 
     template<meta_ostream_t To,
         meta_istream_t From,
         class break_f = meta_range_continue,
-        class Observer = observe_stream>
-    using transfer_until = typename meta_transfer_until<To, From, break_f, Observer>::type;
+        class Observer = observe_stream,
+        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
+    using transfer_until = typename meta_transfer_until<To, From, break_f, Observer, ChangedPred>::type;
 
     template<meta_ostream_t To,
         meta_istream_t From,
         class skip_f,
         class break_f = meta_range_continue,
-        class Observer = observe_stream>
-    using transfer_until_skip = typename meta_transfer_until_skip<To, From, skip_f, break_f, Observer>::type;
+        class Observer = observe_stream,
+        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
+    using transfer_until_skip = typename meta_transfer_until_skip<To, From, skip_f, break_f, Observer, ChangedPred>::type;
 
     //convert meta_stream into a timed meta_object
     template<std::size_t Transfer_Length,
@@ -1727,6 +2014,23 @@ namespace meta_ios {
 
     template<class type_list, class meta_function_type>
     using meta_filter_ostream = io_stream_transform_details::meta_filter_ostream_detail::filter_ostream<type_list, meta_function_type>;
+
+    //A states-based ostream: meta_states_object wrapping a type_list.
+    //accept_pred == true  -> element is appended (last_changed = true)
+    //accept_pred == false -> element is rejected (list unchanged, last_changed = false)
+    template<class TL, class accept_pred>
+    using meta_states_ostream = meta_states_object<
+        TL,
+        io_stream_transform_details::meta_states_ostream_detail::states_ostream_f<accept_pred>,
+        accept_pred
+    >;
+
+    //A states-based iterator ostream: position lives in its own state, no manual indexing.
+    using meta_states_iterator = meta_states_object<
+        io_stream_transform_details::meta_states_iterator_detail::iterator_state<0, exp_list<>>,
+        io_stream_transform_details::meta_states_iterator_detail::iterator_f,
+        io_stream_transform_details::meta_states_iterator_detail::iterator_always_changed
+    >;
     //generate an index type for each element in the istream, starting from 'start'
     //note: this istream never ends
     template<std::size_t start>
