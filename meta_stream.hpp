@@ -805,59 +805,64 @@ namespace meta_objects {
             static constexpr std::uint64_t value = Flags | (std::uint64_t{1} << Index);
         };
 
-        //detect whether F defines on_changed<Obj, FromIs>
-        template<class F, class Obj, class FromIs, class = void>
-        struct has_on_changed : std::false_type {};
-
-        template<class F, class Obj, class FromIs>
-        struct has_on_changed<F, Obj, FromIs,
-            std::void_t<typename F::template on_changed<Obj, FromIs>>>
-            : std::true_type {};
-
-        //detect whether F::apply accepts a third bool_constant parameter
-        template<class F, class Obj, class FromIs, bool Changed, class = void>
-        struct apply_accepts_bool : std::false_type {};
-
-        template<class F, class Obj, class FromIs, bool Changed>
-        struct apply_accepts_bool<F, Obj, FromIs, Changed,
-            std::void_t<typename F::template apply<Obj, FromIs, std::bool_constant<Changed>>>>
-            : std::true_type {};
-
-        //choose which way to call F: on_changed (bool fallback), 3-arg apply, or 2-arg
-        template<bool UseOnChanged, bool PassBool,
-            class F, class Obj, class FromIs, bool Changed>
-        struct next_type_chooser;
-
-        //case 1: on_changed exists and changed -> call on_changed
-        template<class F, class Obj, class FromIs, bool Changed>
-        struct next_type_chooser<true, true, F, Obj, FromIs, Changed> {
-            using type = typename F::template on_changed<Obj, FromIs>;
-        };
-        template<class F, class Obj, class FromIs, bool Changed>
-        struct next_type_chooser<true, false, F, Obj, FromIs, Changed> {
-            using type = typename F::template on_changed<Obj, FromIs>;
+        //detect whether F::apply accepts an extra integral_constant<uint64_t, flags>
+        template<class F, class Obj, class... Args>
+        concept apply_takes_flags = requires {
+            typename F::template apply<Obj, Args..., std::integral_constant<std::uint64_t, 0>>;
         };
 
-        //case 2: no on_changed, but apply takes a bool
-        template<class F, class Obj, class FromIs, bool Changed>
-        struct next_type_chooser<false, true, F, Obj, FromIs, Changed> {
-            using type = typename F::template apply<Obj, FromIs, std::bool_constant<Changed>>;
+        //detect on_changed<Obj, Args...>
+        template<class F, class Obj, class... Args>
+        concept has_on_changed = requires {
+            typename F::template on_changed<Obj, Args...>;
         };
 
-        //case 3: plain 2-arg apply
-        template<class F, class Obj, class FromIs, bool Changed>
-        struct next_type_chooser<false, false, F, Obj, FromIs, Changed> {
-            using type = typename F::template apply<Obj, FromIs>;
+        //choose which way to call F — lazy via partial specialization
+        template<class F, class Obj, bool Changed, std::uint64_t Flags, class... Args>
+        struct compute_next_type;
+
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires has_on_changed<F, Obj, Args...>
+        struct compute_next_type<F, Obj, true, Flags, Args...> {
+            using type = typename F::template on_changed<Obj, Args...>;
         };
 
-        template<class F, class Obj, class FromIs, bool Changed>
-        struct compute_next_type {
-            static constexpr bool use_on_changed =
-                has_on_changed<F, Obj, FromIs>::value && Changed;
-            static constexpr bool pass_bool =
-                apply_accepts_bool<F, Obj, FromIs, Changed>::value;
-            using type = typename next_type_chooser<
-                use_on_changed, pass_bool, F, Obj, FromIs, Changed>::type;
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires (!has_on_changed<F, Obj, Args...>) && apply_takes_flags<F, Obj, Args...>
+        struct compute_next_type<F, Obj, false, Flags, Args...> {
+            using type = typename F::template apply<Obj, Args..., std::integral_constant<std::uint64_t, Flags>>;
+        };
+
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires (!has_on_changed<F, Obj, Args...>) && (!apply_takes_flags<F, Obj, Args...>)
+        struct compute_next_type<F, Obj, false, Flags, Args...> {
+            using type = typename F::template apply<Obj, Args...>;
+        };
+
+        //Changed=true but no on_changed: same as false path
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires (!has_on_changed<F, Obj, Args...>) && apply_takes_flags<F, Obj, Args...>
+        struct compute_next_type<F, Obj, true, Flags, Args...> {
+            using type = typename F::template apply<Obj, Args..., std::integral_constant<std::uint64_t, Flags>>;
+        };
+
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires (!has_on_changed<F, Obj, Args...>) && (!apply_takes_flags<F, Obj, Args...>)
+        struct compute_next_type<F, Obj, true, Flags, Args...> {
+            using type = typename F::template apply<Obj, Args...>;
+        };
+
+        //Changed=false but has on_changed: use plain apply (on_changed only fires when changed)
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires has_on_changed<F, Obj, Args...> && apply_takes_flags<F, Obj, Args...>
+        struct compute_next_type<F, Obj, false, Flags, Args...> {
+            using type = typename F::template apply<Obj, Args..., std::integral_constant<std::uint64_t, Flags>>;
+        };
+
+        template<class F, class Obj, std::uint64_t Flags, class... Args>
+            requires has_on_changed<F, Obj, Args...> && (!apply_takes_flags<F, Obj, Args...>)
+        struct compute_next_type<F, Obj, false, Flags, Args...> {
+            using type = typename F::template apply<Obj, Args...>;
         };
     }
 
@@ -884,18 +889,23 @@ namespace meta_objects {
             return ((byte_flag >> I) & std::uint64_t{1}) != 0;
         }
 
-        template<class FromIs>
-        using changed = meta_invoke<Changed_Pred, OBJ, FromIs>;
+        template<class... Args>
+        using changed = meta_invoke<Changed_Pred, OBJ, Args...>;
 
-        template<class FromIs>
-        using next_type = typename meta_states_details::compute_next_type<
-            F, OBJ, FromIs, changed<FromIs>::value>::type;
-
-        template<class FromIs>
-        using apply = meta_states_object<
-            next_type<FromIs>, F, Changed_Pred,
+        //compute new flags first, then hand to F so F sees the post-step flags
+        template<class... Args>
+        static constexpr std::uint64_t new_flags =
             meta_states_details::next_flags<
-                changed<FromIs>::value, byte_flag, flag_index>::value,
+                changed<Args...>::value, byte_flag, flag_index>::value;
+
+        template<class... Args>
+        using next_type = typename meta_states_details::compute_next_type<
+            F, OBJ, changed<Args...>::value, new_flags<Args...>, Args...>::type;
+
+        template<class... Args>
+        using apply = meta_states_object<
+            next_type<Args...>, F, Changed_Pred,
+            new_flags<Args...>,
             flag_index + 1>;
     };
 
@@ -1482,24 +1492,14 @@ namespace meta_ios {
         //A states-based iterator ostream: position lives in its own OBJ state,
         //just like meta_aligned_iterator stores advance_t in seek_to.
         namespace meta_states_iterator_detail {
-            using meta_basic_ostream_detail::add_f;
-
-            template<std::size_t Count, class List>
-            struct iterator_state {
-                static constexpr std::size_t count = Count;
-                using list = List;
+            //iterator: OBJ is just the flags itself. F is identity —
+            //the third arg already carries the folded flags, so OBJ == Flags.
+            struct iterator_passthrough {
+                template<class Obj, class FromIs, class Flags>
+                using apply = Flags;
             };
 
-            struct iterator_f {
-                template<class state, class from_ins>
-                using apply = iterator_state<
-                    state::count + 1,
-                    add_f<typename state::list,
-                        std::pair<std::integral_constant<std::size_t, state::count>, from_ins>>
-                >;
-            };
-
-            struct iterator_always_changed {
+            struct always_changed {
                 template<class...>
                 struct apply : std::true_type {};
             };
@@ -1971,11 +1971,11 @@ namespace meta_ios {
         accept_pred
     >;
 
-    //A states-based iterator ostream: position lives in its own state, no manual indexing.
+    //A states-based iterator ostream: OBJ IS the flags, pred defaults to always-changed.
     using meta_states_iterator = meta_states_object<
-        io_stream_transform_details::meta_states_iterator_detail::iterator_state<0, exp_list<>>,
-        io_stream_transform_details::meta_states_iterator_detail::iterator_f,
-        io_stream_transform_details::meta_states_iterator_detail::iterator_always_changed
+        std::integral_constant<std::uint64_t, 0>,
+        io_stream_transform_details::meta_states_iterator_detail::iterator_passthrough,
+        io_stream_transform_details::meta_states_iterator_detail::always_changed
     >;
     //generate an index type for each element in the istream, starting from 'start'
     //note: this istream never ends
