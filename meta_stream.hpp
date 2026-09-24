@@ -1741,17 +1741,8 @@ namespace meta_ios {
             static constexpr std::uint64_t opr_code = OpCode;
         };
 
-        //read opr_code from to::type, OR with runtime flags
-        template<class To, class = void>
-        struct read_op { static constexpr std::uint64_t value = stream_op_bits::OP_DEFAULT; };
-
-        template<class To>
-        struct read_op<To, std::void_t<decltype(To::type::opr_code)>> {
-            static constexpr std::uint64_t value = To::type::opr_code | To::flags;
-        };
-
         //states-style update: specialises on meta_states_object.
-        //Reads opr_code from to::type, applies skip/clear/break bits.
+        //Reads opr_code from to::type, applies skip/is_idle/break bits.
         struct meta_stream_s_f {
         private:
             template<class Stream, class = void>
@@ -1765,32 +1756,32 @@ namespace meta_ios {
             template<class To, class From>
             struct update_impl<meta_stream<To, From>, std::void_t<typename To::changed_pred>> {
                 using cache_t = typename meta_stream<To, From>::cache;
-                static constexpr std::uint64_t op = read_op<To>::value;
-                static constexpr bool skip      = !(op & stream_op_bits::OP_SKIP);
-                static constexpr bool clear_os  = !(op & stream_op_bits::OP_OS_CLEAR);
+                static constexpr bool pred = To::template changed<cache_t>::value;
+                static constexpr std::uint64_t code = [] {
+                    if constexpr (requires { To::type::opr_code; }) return To::type::opr_code;
+                    else return stream_op_bits::OP_DEFAULT;
+                }();
+                static constexpr bool skip = (code & stream_op_bits::OP_SKIP) && !pred;
+                static constexpr bool is_idle = (code & stream_op_bits::OP_IS_IDLE) && !pred;
 
-                //rejected: record step, F is NOT called with cache
-                using rejected_to = meta_states_object<
+                static constexpr std::uint64_t cur_flags =
+                    To::flags | (pred ? (1ULL << To::size) : 0);
+
+                //record step: flags updated, flag_index++
+                using recorded = meta_states_object<
                     typename To::type,
                     typename To::function,
                     typename To::changed_pred,
-                    To::flags,
+                    cur_flags,
                     To::size + 1>;
 
-                //cleared ostream: reset OBJ to empty list
-                using cleared_obj = exp_list<>;
-                using cleared_to = meta_states_object<
-                    cleared_obj,
-                    typename To::function,
-                    typename To::changed_pred,
-                    To::flags,
-                    To::size + 1>;
+                //skip or is_idle: from advances but ostream not touched
+                using advancing = meta_stream<recorded, meta_invoke<From>>;
 
-                using type = meta_stream<
-                    std::conditional_t<skip, rejected_to,
-                        std::conditional_t<clear_os, cleared_to,
-                            meta_object_invoke<To, From>>>,
-                    meta_invoke<From>>;
+                //normal: ostream receives cache
+                using normal = meta_stream<meta_object_invoke<To, From>, meta_invoke<From>>;
+
+                using type = std::conditional_t<skip || is_idle, advancing, normal>;
             };
 
         public:
@@ -1808,54 +1799,26 @@ namespace meta_ios {
             template<class this_stream, class ...>
             struct apply {
                 static constexpr bool value = [] {
-                    //op-code break bit: if to is mso and OP_BREAK is off, stop
-                    if constexpr (read_op<typename this_stream::to>::value & stream_op_bits::OP_BREAK) {
-                        if constexpr (
-                            is_end_stream<typename this_stream::from_t> ||
-                            std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
-                        {
+                    if constexpr (is_end_stream<typename this_stream::from_t> ||
+                                  std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
+                        return false;
+
+                    using to_t = typename this_stream::to;
+                    if constexpr (requires { typename to_t::changed_pred; } &&
+                                 requires { to_t::type::opr_code; }) {
+                        constexpr bool pred = to_t::template changed<typename this_stream::cache>::value;
+                        constexpr std::uint64_t code = to_t::type::opr_code;
+                        //break fires when break bit is on AND pred is false
+                        if ((code & stream_op_bits::OP_BREAK) && !pred)
                             return false;
-                        }
-                        else
-                        {
-                            return !meta_invoke<BF, this_stream>::value;
-                        }
                     }
-                    return false;
+                    return !meta_invoke<BF, this_stream>::value;
                 }();
             };
         };
 
                 template<class BF>
                 using meta_transfer_until_condition_o = meta_object<void, meta_transfer_until_condition<BF>>;
-
-        template<class SkipF>
-        struct meta_transfer_until_update {
-            template<class this_stream, class ...>
-            struct apply_impl {
-                static constexpr bool skip = [] {
-                    if constexpr (
-                        is_end_stream<typename this_stream::from_t> ||
-                        std::is_same_v<typename this_stream::cache, literal_types::end_of_list>)
-                    {
-                        return false;
-                    }
-                    else
-                    {
-                        return meta_invoke<SkipF, this_stream>::value;
-                    }
-                }();
-
-                using type = meta_stream<
-                    meta_invoke<invoke_object_if<!skip>,
-                        typename this_stream::to,
-                        typename this_stream::from>,
-                    meta_invoke<typename this_stream::from>>;
-            };
-
-            template<class this_stream, class ...Args>
-            using apply = typename apply_impl<this_stream, Args...>::type;
-        };
 
         template<class To, class From, class ChangedPred>
         using meta_stream_s_o = meta_states_object<
@@ -1902,29 +1865,12 @@ namespace meta_ios {
     using meta_transfer_until = meta_transfer_until_impl<
         To, From, BF, Observer, ChangedPred>;
 
-    //legacy skip API kept for compatibility; skip logic now lives on the ostream
-    template<meta_ostream_t To,
-        meta_istream_t From,
-        class SkipF,
-        class BF = meta_range_continue,
-        class Observer = observe_stream,
-        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
-    using meta_transfer_until_skip = meta_transfer_until_impl<To, From, BF, Observer, ChangedPred>;
-
     template<meta_ostream_t To,
         meta_istream_t From,
         class break_f = meta_range_continue,
         class Observer = observe_stream,
         class ChangedPred = io_stream_transform_details::default_stream_change_pred>
     using transfer_until = typename meta_transfer_until<To, From, break_f, Observer, ChangedPred>::type;
-
-    template<meta_ostream_t To,
-        meta_istream_t From,
-        class skip_f,
-        class break_f = meta_range_continue,
-        class Observer = observe_stream,
-        class ChangedPred = io_stream_transform_details::default_stream_change_pred>
-    using transfer_until_skip = typename meta_transfer_until_skip<To, From, skip_f, break_f, Observer, ChangedPred>::type;
 
     //convert meta_stream into a timed meta_object
     template<std::size_t Transfer_Length,
