@@ -839,7 +839,6 @@ namespace meta_objects {
             using type = typename F::template apply<Obj, Args...>;
         };
 
-        //Changed=true but no on_changed: same as false path
         template<class F, class Obj, std::uint64_t Flags, class... Args>
             requires (!has_on_changed<F, Obj, Args...>) && apply_takes_flags<F, Obj, Args...>
         struct compute_next_type<F, Obj, true, Flags, Args...> {
@@ -852,7 +851,6 @@ namespace meta_objects {
             using type = typename F::template apply<Obj, Args...>;
         };
 
-        //Changed=false but has on_changed: use plain apply (on_changed only fires when changed)
         template<class F, class Obj, std::uint64_t Flags, class... Args>
             requires has_on_changed<F, Obj, Args...> && apply_takes_flags<F, Obj, Args...>
         struct compute_next_type<F, Obj, false, Flags, Args...> {
@@ -1951,6 +1949,11 @@ namespace meta_ios {
 
     template<class type_list>
     using meta_ostream = io_stream_transform_details::meta_basic_ostream_detail::meta_basic_ostream<type_list>;
+
+    //operation-code bits for meta_states_object opr_code
+    namespace stream_op_bits = io_stream_transform_details::stream_op_bits;
+    using io_stream_transform_details::operator_code;
+    using io_stream_transform_details::make_base;
 
     template<class type_list, class meta_function_type>
     using meta_transform_istream = io_stream_transform_details::meta_transform_istream_detail::meta_basic_transform_istream<type_list, meta_function_type>;
