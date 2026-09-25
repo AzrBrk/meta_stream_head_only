@@ -550,45 +550,29 @@ namespace exp_utilities
 }
 
 namespace meta_invoke_protocols {
-    template<template<class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 1;
+   template<std::size_t>
+    struct dummy {};
+
+    template<template<class...> class F, std::size_t... Is>
+    consteval bool can_instantiate(std::index_sequence<Is...>) {
+        return requires { typename F<dummy<Is>...>; };
     }
-    template<template<class, class> class F>
+
+    template<template<class...> class F, std::size_t N = 0, std::size_t Limit = 64>
     consteval std::size_t meta_alias_argc() {
-        return 2;
+    static_assert(N <= Limit, "template parameter count exceeds limit");
+
+    if constexpr (can_instantiate<F>(std::make_index_sequence<N>{})) {
+        if constexpr (!can_instantiate<F>(std::make_index_sequence<N + 1>{})) {
+            return N;
+        } else {
+            return meta_alias_argc<F, N + 1, Limit>();
+        }
+    } else {
+        return meta_alias_argc<F, N + 1, Limit>();
+        }
     }
-    template<template<class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 3;
-    }
-    template<template<class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 4;
-    }
-    template<template<class, class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 5;
-    }
-    template<template<class, class, class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 6;
-    }
-    template<template<class, class, class, class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 7;
-    }
-    template<template<class, class, class, class, class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 8;
-    }
-    template<template<class, class, class, class, class, class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 9;
-    }
-    template<template<class, class, class, class, class, class, class, class, class, class> class F>
-    consteval std::size_t meta_alias_argc() {
-        return 10;
+
     }
     namespace is_meta_function_trait_detail {
         template<template<class ...> class apply_shape> struct meta_function_template_container {};
