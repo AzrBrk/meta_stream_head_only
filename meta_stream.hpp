@@ -24,25 +24,101 @@ struct error {
 };
 }  // namespace literal_types
 namespace exp_select_detail {
-template <int I, class T>
-struct select_type {
+// Helper to find the largest power of 2 <= N (N > 0)
+template <int N>
+struct largest_pow2_le {
+  static constexpr int value = N >= 32   ? 32
+                               : N >= 16 ? 16
+                               : N >= 8  ? 8
+                               : N >= 4  ? 4
+                               : N >= 2  ? 2
+                                         : 1;
+};
+
+// Safely drop a power-of-2 number of elements from a type list.
+// Returns literal_types::no_exist_type if the list is too short.
+template <int N, class T>
+struct safe_drop_pow2 {
   using type = literal_types::no_exist_type;
 };
 
-template <int I, template <typename...> typename TL, class First, class... Rest>
-struct select_type<I, TL<First, Rest...>> {
-  using type = typename select_type<I - 1, TL<Rest...>>::type;
+// N=0: drop nothing
+template <class T>
+struct safe_drop_pow2<0, T> {
+  using type = T;
+};
+
+// Empty list with N>0: failure
+template <int N, template <typename...> typename TL>
+  requires(N > 0)
+struct safe_drop_pow2<N, TL<>> {
+  using type = literal_types::no_exist_type;
+};
+
+// N=1: drop exactly one element
+template <template <typename...> typename TL, class T0, class... Ts>
+struct safe_drop_pow2<1, TL<T0, Ts...>> {
+  using type = TL<Ts...>;
+};
+
+// N>1 with at least two elements: recurse by halving
+template <int N, template <typename...> typename TL, class T0, class T1,
+          class... Ts>
+  requires(N > 1)
+struct safe_drop_pow2<N, TL<T0, T1, Ts...>> {
+  using half = typename safe_drop_pow2<N / 2, TL<T0, T1, Ts...>>::type;
+  using type = typename safe_drop_pow2<N / 2, half>::type;
+};
+
+// Forward declaration
+template <int N, class T>
+struct drop_impl;
+
+// Helper to avoid instantiating drop_impl when the previous drop failed
+template <bool Failed, int N, class T>
+struct drop_impl_helper;
+
+template <int N, class T>
+struct drop_impl_helper<true, N, T> {
+  using type = literal_types::no_exist_type;
+};
+
+template <int N, class T>
+struct drop_impl_helper<false, N, T> {
+  using type = typename drop_impl<N, T>::type;
+};
+
+// Drop N elements using binary decomposition
+template <int N, class T>
+struct drop_impl {
+  static constexpr int P = largest_pow2_le<N>::value;
+  using intermediate = typename safe_drop_pow2<P, T>::type;
+  using type = typename drop_impl_helper<
+      std::is_same<intermediate, literal_types::no_exist_type>::value, N - P,
+      intermediate>::type;
+};
+
+template <class T>
+struct drop_impl<0, T> {
+  using type = T;
+};
+
+// Extract the first element of a type list, or no_exist_type if empty
+template <class T>
+struct first_type {
+  using type = literal_types::no_exist_type;
 };
 
 template <template <typename...> typename TL, class First, class... Rest>
-struct select_type<0, TL<First, Rest...>> {
+struct first_type<TL<First, Rest...>> {
   using type = First;
 };
 
-template <int I, template <class...> class TL>
-struct select_type<I, TL<>> {
-  using type = literal_types::no_exist_type;
-  static_assert(I == -1, "Index out of bounds for exp_select");
+// The optimized select_type
+template <int I, class T>
+struct select_type {
+  using dropped = typename drop_impl<I, T>::type;
+  using type = typename first_type<dropped>::type;
 };
 }  // namespace exp_select_detail
 
@@ -104,6 +180,29 @@ struct is_exp_list_based<TL<TS...>> {
   static constexpr bool value = std::is_base_of_v<exp_list<TS...>, TL<TS...>>;
 };
 
+template <class List, class Acc = exp_list<>>
+struct pop_back_accumulate;
+
+template <class T, class... AccTys>
+struct pop_back_accumulate<exp_list<T>, exp_list<AccTys...>> {
+  using type = exp_list<AccTys...>;
+};
+
+template <class First, class Second, class... Rest, class... AccTys>
+struct pop_back_accumulate<exp_list<First, Second, Rest...>,
+                           exp_list<AccTys...>> {
+  using type = typename pop_back_accumulate<exp_list<Second, Rest...>,
+                                            exp_list<AccTys..., First>>::type;
+};
+
+template <class List>
+struct pop_back_impl;
+
+template <class First, class... Tys>
+struct pop_back_impl<exp_list<First, Tys...>> {
+  using type = typename pop_back_accumulate<exp_list<First, Tys...>>::type;
+};
+
 }  // namespace exp_list_details
 
 template <class First, class... Tys>
@@ -118,7 +217,7 @@ struct exp_list<First, Tys...> {
   template <class T>
   using push_front = exp_list<T, First, Tys...>;
   using pop_front = exp_list<Tys...>;
-  using pop_back = exp_list<Tys...>;
+  using pop_back = typename exp_list_details::pop_back_impl<exp_list>::type;
   using front = First;
   using back =
       exp_select<sizeof...(Tys), exp_list_details::my_list<First, Tys...>>;
@@ -402,6 +501,12 @@ struct value_is {
     struct apply : std::bool_constant<value_equal<T, val> ||
                                       F2::template apply<T>::value> {};
   };
+  template <class F2>
+  struct AND {
+    template <class T>
+    struct apply : std::bool_constant<value_equal<T, val> &&
+                                      F2::template apply<T>::value> {};
+  };
 };
 
 template <auto val>
@@ -414,7 +519,50 @@ struct value_is_not {
     struct apply : std::bool_constant<!(value_equal<T, val> ||
                                         F2::template apply<T>::value)> {};
   };
+  template <class F2>
+  struct AND {
+    template <class T>
+    struct apply : std::bool_constant<!value_equal<T, val> &&
+                                      F2::template apply<T>::value> {};
+  };
 };
+
+template <class T>
+struct type_is {
+  template <class U>
+  struct apply : std::bool_constant<std::is_same_v<get_type<U>, T>> {};
+  template <class F2>
+  struct OR {
+    template <class U>
+    struct apply : std::bool_constant<std::is_same_v<get_type<U>, T> ||
+                                      F2::template apply<U>::value> {};
+  };
+  template <class F2>
+  struct AND {
+    template <class U>
+    struct apply : std::bool_constant<std::is_same_v<get_type<U>, T> &&
+                                      F2::template apply<U>::value> {};
+  };
+};
+
+template <class T>
+struct type_is_not {
+  template <class U>
+  struct apply : std::bool_constant<!std::is_same_v<get_type<U>, T>> {};
+  template <class F2>
+  struct OR {
+    template <class U>
+    struct apply : std::bool_constant<!(std::is_same_v<get_type<U>, T> ||
+                                        F2::template apply<U>::value)> {};
+  };
+  template <class F2>
+  struct AND {
+    template <class U>
+    struct apply : std::bool_constant<!std::is_same_v<get_type<U>, T> &&
+                                      F2::template apply<U>::value> {};
+  };
+};
+
 struct below_zero {
   static constexpr size_t value = 0;
 };
@@ -1783,11 +1931,11 @@ namespace stream_op_bits {
 constexpr std::uint64_t OP_SKIP = 1ULL << 56;      // off: skip element
 constexpr std::uint64_t OP_OS_CLEAR = 1ULL << 57;  // off: clear ostream to
                                                    // empty
-constexpr std::uint64_t OP_IS_IDLE = 1ULL << 58;  // off: pop istream but
-                                                  // discard
-constexpr std::uint64_t OP_OS_IDLE = 1ULL << 59;  // off: call ostream with
-                                                  // empty
-constexpr std::uint64_t OP_STACK = 1ULL << 60;  // on: push, off: pop
+constexpr std::uint64_t OP_IS_IDLE = 1ULL << 58;   // off: pop istream but
+                                                   // discard
+constexpr std::uint64_t OP_OS_IDLE = 1ULL << 59;   // off: call ostream with
+                                                   // empty
+constexpr std::uint64_t OP_STACK = 1ULL << 60;     // on: push, off: pop
 constexpr std::uint64_t OP_TIMER_DEC = 1ULL << 62;
 constexpr std::uint64_t OP_BREAK = 1ULL << 63;           // off: break stream
 constexpr std::uint64_t OP_DEFAULT = ~std::uint64_t{0};  // all on
