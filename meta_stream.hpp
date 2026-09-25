@@ -1249,11 +1249,12 @@ struct meta_looper_impl {
       using stage_t = typename result_stage_o::type;
 
       if constexpr (!observe_result::value) {
-        if constexpr (_continue_) {
-          if constexpr (sizeof...(arg_types)) {
-            return track_apply_t::for_each_forward(
-                f, std::forward<arg_types>(args)...);
-          }
+        if constexpr (_continue_ && sizeof...(arg_types)) {
+          return track_apply_t::for_each_forward(
+              f, std::forward<arg_types>(args)...);
+        } else {
+          // No more observing stages ahead. Return void.
+          return;
         }
       } else {
         // 只推导对第一个参数调用时的返回类型。
