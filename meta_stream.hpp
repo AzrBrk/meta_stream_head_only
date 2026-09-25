@@ -1069,72 +1069,73 @@ namespace meta_loop {
                 using type = typename track_apply_t::type;
 
                 template<class ...arg_types>
-                static constexpr auto for_each(auto&& f, arg_types &&...args) {
-                    if constexpr (!observe_result::value) {
-                        //stage unchanged: never instantiate f, just recurse
-                        if constexpr (_continue_) {
-                            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-                        }
-                    } else {
-                        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...));
+static constexpr auto for_each(auto&& f, arg_types &&...args) {
+    // 把当前阶段类型抽出来，后面推导返回类型时更干净。
+    using stage_t = typename result_stage_o::type;
 
-                        if constexpr (std::is_same_v<return_type, void>)
-                        {
-                            if constexpr (_continue_)
-                            {
-                                std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-                            }
-                        }
-                        else {
-                            return_type ret_val{};
-                            if constexpr (_continue_) {
-                                ret_val = std::invoke(f, typename result_stage_o::type{}, std::forward<arg_types>(args)...);
-                                if constexpr (track_apply_t::_continue_) {
-                                    return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-                                }
-                                else {
-                                    return ret_val;
-                                }
-                            }
-                        }
-                    }
+    if constexpr (!observe_result::value) {
+        // 当前阶段不需要观察：不实例化 f，只负责继续递归。
+        if constexpr (_continue_) {
+            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+        }
+    } else {
+        // 直接用 std::invoke_result_t 推导 f(stage_t{}, args...) 的返回类型，
+        // 不再手写 decltype(std::invoke(...))。
+        using return_type = std::invoke_result_t<decltype(f), stage_t, arg_types...>;
+
+        if constexpr (std::is_void_v<return_type>) {
+            // 返回 void：调用后如果需要继续，则递归；否则自然结束。
+            if constexpr (_continue_) {
+                std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+                return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+            }
+        } else {
+            // 返回非 void：不提前构造 ret_val。
+            // 后续还要递归时丢弃当前返回值，否则直接返回当前调用结果。
+            if constexpr (_continue_) {
+                if constexpr (track_apply_t::_continue_) {
+                    (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+                    return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
+                } else {
+                    return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
                 }
+            }
+        }
+    }
+}
 
+template<class first_arg_type, class ...arg_types>
+static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args) {
+    // 同样抽出当前阶段类型。
+    using stage_t = typename result_stage_o::type;
 
-                template<class first_arg_type, class ...arg_types>
-                static constexpr auto for_each_forward(auto&& f, first_arg_type&& first, arg_types &&...args) {
-                    if constexpr (!observe_result::value) {
-                        if constexpr (_continue_) {
-                            if constexpr (sizeof ...(arg_types)) {
-                                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
-                            }
-                        }
-                    } else {
-                        using return_type = decltype(std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first)));
-                        if constexpr (std::is_same_v<return_type, void>)
-                        {
-                            if constexpr (_continue_) {
-                                std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                                if constexpr (sizeof ...(arg_types))
-                                {
-                                    return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
-                                }
-                            }
-                        }
-                        else {
-                            auto ret_val = [&] {
-                                return std::invoke(f, typename result_stage_o::type{}, std::forward<first_arg_type>(first));
-                            }();
-                            if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
-                                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
-                            }
-                            else {
-                                return ret_val;
-                            }
-                        }
-                    }
+    if constexpr (!observe_result::value) {
+        if constexpr (_continue_) {
+            if constexpr (sizeof ...(arg_types)) {
+                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+            }
+        }
+    } else {
+        // 只推导对第一个参数调用时的返回类型。
+        using return_type = std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
+
+        if constexpr (std::is_void_v<return_type>) {
+            if constexpr (_continue_) {
+                std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+                if constexpr (sizeof ...(arg_types)) {
+                    return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
                 }
+            }
+        } else {
+            if constexpr (track_apply_t::_continue_ && sizeof ...(arg_types)) {
+                (void)std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+                return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
+            } else {
+                return std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+            }
+        }
+    }
+}
             };
         };
 
