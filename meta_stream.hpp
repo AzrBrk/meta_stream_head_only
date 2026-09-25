@@ -1909,9 +1909,10 @@ constexpr std::uint64_t OP_OS_CLEAR = 1ULL << 57;  // off: clear ostream to
                                                    // empty
 constexpr std::uint64_t OP_IS_IDLE = 1ULL << 58;   // off: pop istream but
                                                    // discard
-constexpr std::uint64_t OP_OS_IDLE = 1ULL << 59;   // off: call ostream with
-                                                   // empty
-constexpr std::uint64_t OP_STACK = 1ULL << 60;     // on: push, off: pop
+constexpr std::uint64_t OP_OS_IDLE = 1ULL
+                                     << 59;  // on: force-call ostream function
+                                             // even when pred is false
+constexpr std::uint64_t OP_STACK = 1ULL << 60;  // on: push, off: pop
 constexpr std::uint64_t OP_TIMER_DEC = 1ULL << 62;
 constexpr std::uint64_t OP_BREAK = 1ULL << 63;           // off: break stream
 constexpr std::uint64_t OP_DEFAULT = ~std::uint64_t{0};  // all on
@@ -1963,6 +1964,8 @@ struct meta_stream_s_f {
     static constexpr bool skip = (code & stream_op_bits::OP_SKIP) && !pred;
     static constexpr bool is_idle =
         (code & stream_op_bits::OP_IS_IDLE) && !pred;
+    static constexpr bool call_os =
+        (code & stream_op_bits::OP_OS_IDLE) && !pred;
 
     static constexpr std::uint64_t cur_flags =
         To::flags | (pred ? (1ULL << To::size) : 0);
@@ -1975,10 +1978,18 @@ struct meta_stream_s_f {
     // skip or is_idle: from advances but ostream not touched
     using advancing = meta_stream<recorded, meta_invoke<From>>;
 
+    // call_os: force-call function directly, replace OBJ, advance from
+    using called_os =
+        meta_stream<typename To::template meta_set<meta_invoke<
+                        typename To::function, typename To::type, cache_t>>,
+                    meta_invoke<From>>;
+
     // normal: ostream receives cache
     using normal = meta_stream<meta_object_invoke<To, From>, meta_invoke<From>>;
 
-    using type = std::conditional_t<skip || is_idle, advancing, normal>;
+    using type =
+        std::conditional_t<skip || is_idle, advancing,
+                           std::conditional_t<call_os, called_os, normal>>;
   };
 
  public:
