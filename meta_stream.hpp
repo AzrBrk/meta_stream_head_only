@@ -692,6 +692,13 @@ namespace meta_invoke_protocols {
 template <std::size_t>
 struct dummy {};
 
+template <template <class...> class apply_shape>
+struct meta_function_template_container {};
+
+template <class F>
+concept meta_function_t =
+    requires { typename meta_function_template_container<F::template apply>; };
+
 template <template <class...> class F, std::size_t... Is>
 consteval bool can_instantiate(std::index_sequence<Is...>) {
   return requires { typename F<dummy<Is>...>; };
@@ -714,32 +721,20 @@ consteval std::size_t meta_alias_argc() {
 }
 
 }  // namespace meta_invoke_protocols
-namespace is_meta_function_trait_detail {
-template <template <class...> class apply_shape>
-struct meta_function_template_container {};
 
-template <class F, class En = void>
-struct is_meta_function_type : std::false_type {};
+using meta_invoke_protocols::meta_function_t;
 
 template <class F>
-struct is_meta_function_type<
-    F, std::void_t<meta_function_template_container<F::template apply>>>
-    : std::true_type {};
-
-}  // namespace is_meta_function_trait_detail
-
-template <class F>
-constexpr bool is_meta_function_v =
-    is_meta_function_trait_detail::is_meta_function_type<F>::value;
+constexpr bool is_meta_function_v = meta_function_t<F>;
 
 namespace meta_invoke_detail {
 template <class F, class... L>
 struct impl {
-  static_assert(is_meta_function_v<F>,
+  static_assert(meta_function_t<F>,
                 "First parameter of meta_invoke must be a meta function");
 };
 template <class F, class... L>
-  requires is_meta_function_v<F>
+  requires meta_function_t<F>
 struct impl<F, L...> {
   using type = typename F::template apply<L...>;
 };
@@ -932,15 +927,14 @@ using meta_ret_init = meta_ret_object<meta_objects_details::meta_empty, F, Ret>;
 
 namespace meta_states_details {
 template <bool Changed, std::uint64_t Flags, std::size_t Index>
-struct next_flags {
-  static constexpr std::uint64_t value = Flags;
-};
-
-template <std::uint64_t Flags, std::size_t Index>
-struct next_flags<true, Flags, Index> {
-  static_assert(Index < std::numeric_limits<std::uint64_t>::digits);
-  static constexpr std::uint64_t value = Flags | (std::uint64_t{1} << Index);
-};
+consteval std::uint64_t next_flags() {
+  if constexpr (Changed) {
+    static_assert(Index < std::numeric_limits<std::uint64_t>::digits);
+    return Flags | (std::uint64_t{1} << Index);
+  } else {
+    return Flags;
+  }
+}
 
 // detect whether F::apply accepts an extra integral_constant<uint64_t, flags>
 template <class F, class Obj, class... Args>
@@ -954,72 +948,26 @@ template <class F, class Obj, class... Args>
 concept has_on_changed =
     requires { typename F::template on_changed<Obj, Args...>; };
 
-// choose which way to call F — lazy via partial specialization
 template <class F, class Obj, bool Changed, std::uint64_t Flags, class... Args>
-struct compute_next_type;
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires has_on_changed<F, Obj, Args...>
-struct compute_next_type<F, Obj, true, Flags, Args...> {
-  using type = typename F::template on_changed<Obj, Args...>;
-};
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires(!has_on_changed<F, Obj, Args...>) &&
-          apply_takes_flags<F, Obj, Args...>
-struct compute_next_type<F, Obj, false, Flags, Args...> {
-  using type =
-      typename F::template apply<Obj, Args...,
-                                 std::integral_constant<std::uint64_t, Flags>>;
-};
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires(!has_on_changed<F, Obj, Args...>) &&
-          (!apply_takes_flags<F, Obj, Args...>)
-struct compute_next_type<F, Obj, false, Flags, Args...> {
-  using type = typename F::template apply<Obj, Args...>;
-};
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires(!has_on_changed<F, Obj, Args...>) &&
-          apply_takes_flags<F, Obj, Args...>
-struct compute_next_type<F, Obj, true, Flags, Args...> {
-  using type =
-      typename F::template apply<Obj, Args...,
-                                 std::integral_constant<std::uint64_t, Flags>>;
-};
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires(!has_on_changed<F, Obj, Args...>) &&
-          (!apply_takes_flags<F, Obj, Args...>)
-struct compute_next_type<F, Obj, true, Flags, Args...> {
-  using type = typename F::template apply<Obj, Args...>;
-};
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires has_on_changed<F, Obj, Args...> && apply_takes_flags<F, Obj, Args...>
-struct compute_next_type<F, Obj, false, Flags, Args...> {
-  using type =
-      typename F::template apply<Obj, Args...,
-                                 std::integral_constant<std::uint64_t, Flags>>;
-};
-
-template <class F, class Obj, std::uint64_t Flags, class... Args>
-  requires has_on_changed<F, Obj, Args...> &&
-           (!apply_takes_flags<F, Obj, Args...>)
-struct compute_next_type<F, Obj, false, Flags, Args...> {
-  using type = typename F::template apply<Obj, Args...>;
-};
+consteval auto compute_next_type() {
+  if constexpr (Changed && has_on_changed<F, Obj, Args...>) {
+    return std::type_identity<typename F::template on_changed<Obj, Args...>>{};
+  } else if constexpr (apply_takes_flags<F, Obj, Args...>) {
+    return std::type_identity<typename F::template apply<
+        Obj, Args..., std::integral_constant<std::uint64_t, Flags>>>{};
+  } else {
+    return std::type_identity<typename F::template apply<Obj, Args...>>{};
+  }
+}
 }  // namespace meta_states_details
 
 template <class OBJ, class F, class Changed_Pred, std::uint64_t byte_flag = 0,
           std::size_t flag_index = 0>
-  requires is_meta_function_v<F> && is_meta_function_v<Changed_Pred>
+  requires meta_function_t<F> && meta_function_t<Changed_Pred>
 struct meta_states_object {
   using type = OBJ;
   using function = F;
   using changed_pred = Changed_Pred;
-
   static constexpr std::uint64_t flags = byte_flag;
   static constexpr std::size_t size = flag_index;
   static constexpr bool last_changed =
@@ -1039,19 +987,20 @@ struct meta_states_object {
   template <class... Args>
   using changed = meta_invoke<Changed_Pred, OBJ, Args...>;
 
-  // compute new flags first, then hand to F so F sees the post-step flags
   template <class... Args>
-  static constexpr std::uint64_t new_flags =
-      meta_states_details::next_flags<changed<Args...>::value, byte_flag,
-                                      flag_index>::value;
+  static consteval std::uint64_t new_flags() {
+    return meta_states_details::next_flags<changed<Args...>::value, byte_flag,
+                                           flag_index>();
+  }
 
   template <class... Args>
-  using next_type = typename meta_states_details::compute_next_type<
-      F, OBJ, changed<Args...>::value, new_flags<Args...>, Args...>::type;
+  using next_type = typename decltype(meta_states_details::compute_next_type<
+                                      F, OBJ, changed<Args...>::value,
+                                      new_flags<Args...>(), Args...>())::type;
 
   template <class... Args>
   using apply = meta_states_object<next_type<Args...>, F, Changed_Pred,
-                                   new_flags<Args...>, flag_index + 1>;
+                                   new_flags<Args...>(), flag_index + 1>;
 };
 
 namespace meta_states_details {
@@ -1728,6 +1677,33 @@ using index_istream =
 
 }  // namespace meta_index_istream_detail
 
+namespace ranged_based_index_sequence_istream_detail {
+template <std::size_t dec_index>
+struct index_counter : std::integral_constant<std::size_t, dec_index>,
+                       end_of_stream<(dec_index == 0)> {
+  static constexpr std::size_t length = dec_index;
+  using dec_t = index_counter<dec_index - 1>;
+  template <std::size_t Len>
+  using ret_t = index_counter<Len - dec_index>;
+};
+
+template <std::size_t Len>
+struct dec_index_f {
+  template <class this_index, class...>
+  using apply = typename this_index::dec_t;
+};
+
+template <std::size_t Len>
+struct ret_index {
+  template <class this_index, class...>
+  using apply = typename this_index::template ret_t<Len>;
+};
+
+template <std::size_t Len>
+using ranged_index_istream =
+    meta_ret_object<index_counter<Len>, dec_index_f<Len>, ret_index<Len>>;
+}  // namespace ranged_based_index_sequence_istream_detail
+
 namespace meta_replace_able_ostream_detail {
 using exp_utilities::literal_types::no_exist_type;
 template <class this_obj, class T>
@@ -2200,6 +2176,11 @@ template <std::size_t start>
 using meta_index_istream =
     io_stream_transform_details::meta_index_istream_detail::index_istream<
         start>;
+
+// warning: ranged based, a timer based transfer cannot detect length
+template <std::size_t Len>
+using index_sequence_istream = io_stream_transform_details::
+    ranged_based_index_sequence_istream_detail::ranged_index_istream<Len>;
 
 template <std::size_t start, std::size_t count>
 using meta_count = typename transfer<count, meta_ostream<exp_list<>>,
