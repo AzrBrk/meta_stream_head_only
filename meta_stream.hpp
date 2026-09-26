@@ -2061,21 +2061,27 @@ struct meta_stream_s_f {
         meta_states_object<typename To::type, typename To::function,
                            typename To::changed_pred, cur_flags, To::size + 1>;
 
-    // skip or is_idle: from advances but ostream not touched
-    using advancing = meta_stream<recorded, meta_invoke<From>>;
+    // from side: controlled by opCallIs
+    // if call_is and !pred, advance from; else stay
+    using from_advancing = meta_invoke<From>;
+    using from_stay = From;
+    using next_from = std::conditional_t<is_idle, from_advancing, from_stay>;
 
-    // call_os: force-call function directly, replace OBJ, advance from
-    using called_os =
-        meta_stream<typename To::template meta_set<meta_invoke<
-                        typename To::function, typename To::type, cache_t>>,
-                    meta_invoke<From>>;
+    // ostream side: controlled by opCallOs / opSkip
+    // 1. call_os: force-call function directly
+    using ostream_called = typename To::template meta_set<
+        meta_invoke<typename To::function, typename To::type, cache_t>>;
+    // 2. skip: ostream unchanged
+    using ostream_skipped = recorded;
+    // 3. normal: ostream receives cache
+    using ostream_normal = meta_object_invoke<To, From>;
 
-    // normal: ostream receives cache
-    using normal = meta_stream<meta_object_invoke<To, From>, meta_invoke<From>>;
+    // choose ostream behavior
+    using next_ostream = std::conditional_t<
+        call_os, ostream_called,
+        std::conditional_t<skip, ostream_skipped, ostream_normal>>;
 
-    using type =
-        std::conditional_t<skip || is_idle, advancing,
-                           std::conditional_t<call_os, called_os, normal>>;
+    using type = meta_stream<next_ostream, next_from>;
   };
 
  public:
