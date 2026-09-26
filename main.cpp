@@ -7,8 +7,6 @@
 using namespace meta_ios;
 using namespace exp_utilities;
 using namespace meta_objects;
-using namespace meta_ios::io_stream_transform_details;
-using namespace meta_ios::io_stream_transform_details::stream_op_bits;
 
 // 测试 1：stream_op 基类
 struct MyType : stream_op<opSkip | opCallIs | opBreak> {
