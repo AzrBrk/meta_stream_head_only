@@ -2076,8 +2076,11 @@ struct meta_stream_s_f {
     };
 
     // next_from: controlled by opCallIs
-    using next_from = typename choose_from<is_idle, From>::type;
-
+    // next_from: controlled by opCallIs
+    // normal case (pred=true): always advance from
+    // when pred=false: advance only if opCallIs is on
+    static constexpr bool advance_from = pred || is_idle;
+    using next_from = typename choose_from<advance_from, From>::type;
     // choose_ostream<CallOs, Skip>: select ostream type
     template <bool CallOs, bool Skip, class ToT, class FromT, class RecordedT, class CacheT>
     struct choose_ostream;
