@@ -397,7 +397,8 @@ struct type_list_size<TL<Tys...>> {
 };
 }  // namespace exp_size_details
 template <class L>
-constexpr std::size_t exp_size = exp_size_details::type_list_size<L>::value;
+constexpr std::size_t exp_size =
+    exp_size_details::type_list_size<std::remove_cvref_t<L>>::value;
 
 namespace max_index_details {
 template <class TL>
@@ -2129,27 +2130,51 @@ struct meta_always_false_c_o {
   struct apply : std::false_type {};
 };
 
+// Condition implementation, dispatched by whether stream has ended
+// Uses template specialization instead of lambda if constexpr to ensure
+// invalid branches are never substituted/instantiated
+template <class Stream, class BF, bool Ended>
+struct transfer_condition_impl {
+  static constexpr bool value = false;
+};
+
+template <class Stream, class BF>
+struct transfer_condition_impl<Stream, BF, false> {
+ private:
+  using to_t = typename Stream::to;
+  using cache_t = typename Stream::cache;
+
+  // Check inner MSO break bit
+  template <class T, class = void>
+  struct inner_break {
+    static constexpr bool value = false;
+  };
+
+  template <class T>
+  struct inner_break<T, std::void_t<typename T::changed_pred>> {
+    static constexpr bool pred = T::template changed<cache_t>::value;
+    static constexpr std::uint64_t code =
+        T::flags & ~meta_states_details::FLAGS_LOW_MASK;
+    static constexpr bool value =
+        (code & stream_op_bits::OP_BREAK) && !pred;
+  };
+
+ public:
+  static constexpr bool value =
+      !(inner_break<to_t>::value ||
+        meta_invoke<BF, Stream>::value);
+};
+
 template <class BF>
 struct meta_transfer_until_condition {
   template <class this_stream, class...>
   struct apply {
-    static constexpr bool value = [] {
-      if constexpr (is_end_stream<typename this_stream::from_t::type> ||
-                    std::is_same_v<typename this_stream::cache,
-                                   literal_types::end_of_list>)
-        return false;
-
-      using to_t = typename this_stream::to;
-      if constexpr (requires { typename to_t::changed_pred; }) {
-        constexpr bool pred =
-            to_t::template changed<typename this_stream::cache>::value;
-        // opr_code is stored in high 8 bits of flags
-        constexpr std::uint64_t code = to_t::flags & ~meta_states_details::FLAGS_LOW_MASK;
-        // break fires when break bit is on AND pred is false
-        if ((code & stream_op_bits::OP_BREAK) && !pred) return false;
-      }
-      return !meta_invoke<BF, this_stream>::value;
-    }();
+    static constexpr bool stream_ended =
+        is_end_stream<typename this_stream::from_t> ||
+        std::is_same_v<typename this_stream::cache,
+                       literal_types::end_of_list>;
+    static constexpr bool value =
+        transfer_condition_impl<this_stream, BF, stream_ended>::value;
   };
 };
 
