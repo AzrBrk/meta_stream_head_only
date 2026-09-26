@@ -1929,6 +1929,12 @@ constexpr std::uint64_t opCallOs = OP_OS_IDLE;
 constexpr std::uint64_t opBreak = OP_BREAK;
 }  // namespace stream_op_bits
 
+
+// stream_op<Code>: base class for user-defined states types, holds opr_code
+template <std::uint64_t Code = stream_op_bits::OP_DEFAULT>
+struct stream_op {
+  static constexpr std::uint64_t opr_code = Code;
+};
 // operator_code<bits...>: those bits are turned OFF (triggered)
 template <std::uint64_t... Bits>
 struct operator_code {
@@ -1942,6 +1948,54 @@ struct make_base {
   static constexpr std::uint64_t opr_code = OpCode;
 };
 
+
+// meta_states concept: check if a type has apply / on_changed / pred
+template <class States>
+concept meta_states = requires {
+  typename States::template apply<std::integral_constant<std::size_t, 0>, std::integral_constant<std::size_t, 0>>;
+  typename States::template on_changed<std::integral_constant<std::size_t, 0>, std::integral_constant<std::size_t, 0>>;
+  typename States::template pred<std::integral_constant<std::size_t, 0>, std::integral_constant<std::size_t, 0>>;
+};
+
+// meta_states_with_opcode concept: also has opr_code
+template <class States>
+concept meta_states_with_opcode = meta_states<States> && requires {
+  States::opr_code;
+};
+
+
+// states_wrapper: wraps a user-defined states struct into a meta-function
+// that has both apply and on_changed
+template <class States>
+struct states_wrapper {
+  template <class Obj, class From>
+  using apply = typename States::template apply<Obj, From>;
+
+  template <class Obj, class From>
+  using on_changed = typename States::template on_changed<Obj, From>;
+};
+// make_states_type: wrap a user-defined states struct into meta_states_object
+template <meta_states States>
+struct make_states_type {
+  static constexpr bool has_opcode = requires { States::opr_code; };
+  using type = std::conditional_t<
+      has_opcode,
+      meta_states_object<
+          get_type<States>,
+          states_wrapper<States>,
+          meta_quote::binary<States::template pred>,
+          States::opr_code>,
+      meta_states_object<
+          get_type<States>,
+          states_wrapper<States>,
+          meta_quote::binary<States::template pred>,
+          stream_op<>::opr_code>
+  >;
+};
+
+// convenience alias
+template <class T>
+using meta_make_states = typename make_states_type<T>::type;
 // states-style update: specialises on meta_states_object.
 // Reads opr_code from to::type, applies skip/is_idle/break bits.
 struct meta_stream_s_f {
