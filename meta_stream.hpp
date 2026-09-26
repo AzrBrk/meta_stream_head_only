@@ -614,14 +614,24 @@ struct meta_array : exp_list<Idx<_elements>...> {
   }
 };
 
-template <class TL>
-struct to_meta_array {
-  static_assert(sizeof(TL) == 0, "not all elements has value");
+// Element has a static constexpr size_t value member
+// (e.g. std::integral_constant<size_t, N>, Idx<N>, custom index types)
+template <class T>
+concept has_size_t_value = requires {
+  { T::value } -> std::convertible_to<std::size_t>;
 };
 
-template <template <class...> class integer_wrapper, std::size_t... elements>
-struct to_meta_array<integer_wrapper<Idx<elements>...>> {
-  using type = meta_array<elements...>;
+template <class TL>
+struct to_meta_array {
+  static_assert(sizeof(TL) == 0,
+                "to_meta_array: not all elements have size_t value");
+};
+
+// Matches any type wrapper whose elements all expose size_t value
+template <template <class...> class Wrapper, class... Ts>
+  requires(has_size_t_value<Ts> && ...)
+struct to_meta_array<Wrapper<Ts...>> {
+  using type = meta_array<Ts::value...>;
 };
 
 template <class TL>
