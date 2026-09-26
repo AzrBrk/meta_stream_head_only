@@ -2134,7 +2134,7 @@ struct meta_transfer_until_condition {
   template <class this_stream, class...>
   struct apply {
     static constexpr bool value = [] {
-      if constexpr (is_end_stream<typename this_stream::from_t> ||
+      if constexpr (is_end_stream<typename this_stream::from_t::type> ||
                     std::is_same_v<typename this_stream::cache,
                                    literal_types::end_of_list>)
         return false;
