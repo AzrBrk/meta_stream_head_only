@@ -926,13 +926,30 @@ template <class F, class Ret>
 using meta_ret_init = meta_ret_object<meta_objects_details::meta_empty, F, Ret>;
 
 namespace meta_states_details {
+// low 56 bits: change history
+// high 8 bits: opr_code (never touched by next_flags)
+constexpr std::uint64_t FLAGS_LOW_MASK = (1ULL << 56) - 1;
+
 template <bool Changed, std::uint64_t Flags, std::size_t Index>
 consteval std::uint64_t next_flags() {
-  if constexpr (Changed) {
-    static_assert(Index < std::numeric_limits<std::uint64_t>::digits);
-    return Flags | (std::uint64_t{1} << Index);
+  // extract high 8 bits (opr_code)
+  constexpr std::uint64_t opr_code = Flags & ~FLAGS_LOW_MASK;
+  // low 56 bits: change history
+  constexpr std::uint64_t low_flags = Flags & FLAGS_LOW_MASK;
+
+  if constexpr (Index >= 56) {
+    // overflow: reset low 56 bits to 0, keep high bits
+    if constexpr (Changed) {
+      return opr_code | 1ULL;  // reset and set first bit
+    } else {
+      return opr_code;  // just reset
+    }
   } else {
-    return Flags;
+    if constexpr (Changed) {
+      return opr_code | (low_flags | (1ULL << Index));
+    } else {
+      return Flags;
+    }
   }
 }
 
@@ -998,9 +1015,28 @@ struct meta_states_object {
                                       F, OBJ, changed<Args...>::value,
                                       new_flags<Args...>(), Args...>())::type;
 
+  // reset_flag_index: reset flag_index to 0, keep everything else
+  using reset_flag_index = meta_states_object<OBJ, F, Changed_Pred,
+                                             byte_flag, 0>;
+
+  // apply_impl: helper to avoid instantiating both branches of conditional
+  template <bool Overflow, class... Args>
+  struct apply_impl;
+
   template <class... Args>
-  using apply = meta_states_object<next_type<Args...>, F, Changed_Pred,
+  struct apply_impl<false, Args...> {
+    using type = meta_states_object<next_type<Args...>, F, Changed_Pred,
                                    new_flags<Args...>(), flag_index + 1>;
+  };
+
+  template <class... Args>
+  struct apply_impl<true, Args...> {
+    using type = meta_states_object<next_type<Args...>, F, Changed_Pred,
+                                   new_flags<Args...>(), 0>;
+  };
+
+  template <class... Args>
+  using apply = typename apply_impl<(flag_index >= 56), Args...>::type;
 };
 
 namespace meta_states_details {
@@ -1908,18 +1944,14 @@ struct meta_stream_f {
 // opr_code defaults to all-ones (0xFF00000000000000): every bit "on" = normal.
 // bit=0 triggers the special behaviour.
 namespace stream_op_bits {
-constexpr std::uint64_t OP_SKIP = 1ULL << 56;      // off: skip element
-constexpr std::uint64_t OP_OS_CLEAR = 1ULL << 57;  // off: clear ostream to
-                                                   // empty
-constexpr std::uint64_t OP_IS_IDLE = 1ULL << 58;   // off: pop istream but
-                                                   // discard
-constexpr std::uint64_t OP_OS_IDLE = 1ULL
-                                     << 59;  // on: force-call ostream function
-                                             // even when pred is false
-constexpr std::uint64_t OP_STACK = 1ULL << 60;  // on: push, off: pop
+constexpr std::uint64_t OP_SKIP = 1ULL << 56;      // on: skip element when pred is false
+constexpr std::uint64_t OP_OS_CLEAR = 1ULL << 57;  // on: clear ostream to empty when pred is false
+constexpr std::uint64_t OP_IS_IDLE = 1ULL << 58;   // on: pop istream but discard when pred is false
+constexpr std::uint64_t OP_OS_IDLE = 1ULL << 59;   // on: force-call ostream function even when pred is false
+constexpr std::uint64_t OP_STACK = 1ULL << 60;     // on: push, off: pop
 constexpr std::uint64_t OP_TIMER_DEC = 1ULL << 62;
-constexpr std::uint64_t OP_BREAK = 1ULL << 63;           // off: break stream
-constexpr std::uint64_t OP_DEFAULT = ~std::uint64_t{0};  // all on
+constexpr std::uint64_t OP_BREAK = 1ULL << 63;     // on: break stream when pred is false
+constexpr std::uint64_t OP_DEFAULT = OP_SKIP | OP_IS_IDLE;  // default: skip + call_is on
 
 // short names
 constexpr std::uint64_t opSkip = OP_SKIP;
@@ -2013,12 +2045,8 @@ struct meta_stream_s_f {
                      std::void_t<typename To::changed_pred>> {
     using cache_t = typename meta_stream<To, From>::cache;
     static constexpr bool pred = To::template changed<cache_t>::value;
-    static constexpr std::uint64_t code = [] {
-      if constexpr (requires { To::type::opr_code; })
-        return To::type::opr_code;
-      else
-        return stream_op_bits::OP_DEFAULT;
-    }();
+    // opr_code is stored in high 8 bits of flags
+    static constexpr std::uint64_t code = To::flags & ~meta_states_details::FLAGS_LOW_MASK;
     static constexpr bool skip = (code & stream_op_bits::OP_SKIP) && !pred;
     static constexpr bool is_idle =
         (code & stream_op_bits::OP_IS_IDLE) && !pred;
@@ -2033,21 +2061,56 @@ struct meta_stream_s_f {
         meta_states_object<typename To::type, typename To::function,
                            typename To::changed_pred, cur_flags, To::size + 1>;
 
-    // skip or is_idle: from advances but ostream not touched
-    using advancing = meta_stream<recorded, meta_invoke<From>>;
+    // choose_from<Advance>: select from type based on whether to advance
+    template <bool Advance, class FromT>
+    struct choose_from;
 
-    // call_os: force-call function directly, replace OBJ, advance from
-    using called_os =
-        meta_stream<typename To::template meta_set<meta_invoke<
-                        typename To::function, typename To::type, cache_t>>,
-                    meta_invoke<From>>;
+    template <class FromT>
+    struct choose_from<true, FromT> {
+      using type = meta_invoke<FromT>;
+    };
 
-    // normal: ostream receives cache
-    using normal = meta_stream<meta_object_invoke<To, From>, meta_invoke<From>>;
+    template <class FromT>
+    struct choose_from<false, FromT> {
+      using type = FromT;
+    };
 
-    using type =
-        std::conditional_t<skip || is_idle, advancing,
-                           std::conditional_t<call_os, called_os, normal>>;
+    // next_from: controlled by opCallIs
+    using next_from = typename choose_from<is_idle, From>::type;
+
+    // choose_ostream<CallOs, Skip>: select ostream type
+    template <bool CallOs, bool Skip, class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream;
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<true, true, ToT, FromT, RecordedT, CacheT> {
+      // call_os takes priority
+      using type = typename ToT::template meta_set<
+          meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
+    };
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<true, false, ToT, FromT, RecordedT, CacheT> {
+      using type = typename ToT::template meta_set<
+          meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
+    };
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<false, true, ToT, FromT, RecordedT, CacheT> {
+      // skip: ostream unchanged
+      using type = RecordedT;
+    };
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<false, false, ToT, FromT, RecordedT, CacheT> {
+      // normal: ostream receives cache
+      using type = meta_object_invoke<ToT, FromT>;
+    };
+
+    // next_ostream: controlled by opCallOs / opSkip
+    using next_ostream = typename choose_ostream<call_os, skip, To, From, recorded, cache_t>::type;
+
+    using type = meta_stream<next_ostream, next_from>;
   };
 
  public:
@@ -2071,12 +2134,11 @@ struct meta_transfer_until_condition {
         return false;
 
       using to_t = typename this_stream::to;
-      if constexpr (
-          requires { typename to_t::changed_pred; } &&
-          requires { to_t::type::opr_code; }) {
+      if constexpr (requires { typename to_t::changed_pred; }) {
         constexpr bool pred =
             to_t::template changed<typename this_stream::cache>::value;
-        constexpr std::uint64_t code = to_t::type::opr_code;
+        // opr_code is stored in high 8 bits of flags
+        constexpr std::uint64_t code = to_t::flags & ~meta_states_details::FLAGS_LOW_MASK;
         // break fires when break bit is on AND pred is false
         if ((code & stream_op_bits::OP_BREAK) && !pred) return false;
       }
@@ -2203,8 +2265,30 @@ using meta_ostream =
 
 // operation-code bits for meta_states_object opr_code
 namespace stream_op_bits = io_stream_transform_details::stream_op_bits;
+
+// short names for op bits, directly in meta_ios
+using io_stream_transform_details::stream_op_bits::OP_SKIP;
+using io_stream_transform_details::stream_op_bits::OP_OS_CLEAR;
+using io_stream_transform_details::stream_op_bits::OP_IS_IDLE;
+using io_stream_transform_details::stream_op_bits::OP_OS_IDLE;
+using io_stream_transform_details::stream_op_bits::OP_STACK;
+using io_stream_transform_details::stream_op_bits::OP_TIMER_DEC;
+using io_stream_transform_details::stream_op_bits::OP_BREAK;
+using io_stream_transform_details::stream_op_bits::OP_DEFAULT;
+using io_stream_transform_details::stream_op_bits::opSkip;
+using io_stream_transform_details::stream_op_bits::opReset;
+using io_stream_transform_details::stream_op_bits::opCallIs;
+using io_stream_transform_details::stream_op_bits::opCallOs;
+using io_stream_transform_details::stream_op_bits::opBreak;
+
 using io_stream_transform_details::make_base;
 using io_stream_transform_details::operator_code;
+using io_stream_transform_details::stream_op;
+using io_stream_transform_details::meta_states;
+using io_stream_transform_details::meta_states_with_opcode;
+using io_stream_transform_details::states_wrapper;
+using io_stream_transform_details::make_states_type;
+using io_stream_transform_details::meta_make_states;
 
 template <class type_list, class meta_function_type>
 using meta_transform_istream =
