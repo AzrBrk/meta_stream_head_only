@@ -43,12 +43,12 @@ int main() {
                                         std::string>>::to_t{};
   iter.get(data) = std::string("not world");
 
-  // pipe: align -> reverse-collect, terminal self-terminating istream
-  using entry =
-      pipe::transfer<meta_istream_list<int, std::string, char, std::string>>;
-  using ms = decltype(
-      entry::all_to<meta_aligned_iterator>::all_to<r_ostream>::transfer());
-  using final_is = meta_istream<ms::to::type>;
+  // pipe: align -> (collect via transfer_until into r_ostream)
+  using aligned_node =
+      meta_pipe<meta_istream_list<int, std::string, char, std::string>>::
+          all_to<meta_aligned_iterator>::transfer::from;
+  using collected = transfer_until<r_ostream, aligned_node>::to::type;
+  using final_is = meta_istream<collected>;
 
   // destroy in reverse construction order
   std::cout << "reverse destroy:" << std::endl;

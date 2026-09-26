@@ -10,11 +10,12 @@ using namespace exp_utilities;
 using namespace meta_objects;
 
 int main() {
-  // Build a passthrough pipe, take .from (a self-terminating istream)
-  using P1 = pipe::transfer<meta_istream_list<int, double, char>>::
-      all_to<meta_iterator>::from;
+  // Build a passthrough pipe; .transfer::from is the self-terminating istream
+  using P1 = meta_pipe<meta_istream_list<int, double, char>>::
+      all_to<meta_iterator>::transfer::from;
 
-  std::cout << "=== passthrough pipe, .from driven directly ===" << std::endl;
+  std::cout << "=== passthrough pipe, transfer::from driven directly ==="
+            << std::endl;
   int count = 0;
   meta_transfer_until<meta_iterator, P1>::for_each([&](auto s) {
     std::cout << s.target_type().name() << std::endl;

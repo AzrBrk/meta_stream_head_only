@@ -2709,43 +2709,37 @@ using stream_istream = meta_ret_object<
     io_stream_transform_details::meta_stream_s_f,
     ret_from_node<ps...>>;
 
-// transfer_pipe: holds the input istream and the current stage ostream.
-// Termination needs no iteration count -- it propagates through the
-// end_of_stream protocol, so filters that change element counts are fine.
+// meta_pipe_builder: holds the input istream and the current stage ostream.
+// Construction is fully lazy -- *_to only composes types, nothing runs.
+// Termination needs no count: it propagates via the end_of_stream protocol,
+// so filters that change element counts work as well.
 template <meta_istream_t Is, meta_ostream_t Os>
-struct transfer_pipe {
-  // Node stream for this stage: a self-terminating istream that feeds the
-  // next stage. Building the pipe (*_to) stays lazy; nothing runs here.
-  using from = stream_istream<Is, Os>;
-
-  // Append a stage passing every element through next_os (lazy)
+struct meta_pipe_builder {
+  // Append a stage passing every element through next_os
   template <meta_ostream_t next_os, template <class> class... ps>
-  using all_to = transfer_pipe<stream_istream<Is, Os>, next_os>;
+  using all_to = meta_pipe_builder<stream_istream<Is, Os>, next_os>;
 
-  // Append a stage forwarding only the last produced element (lazy)
+  // Append a stage forwarding only the last element of a produced list
+  // (inserts the forward_last protocol into the current node stream)
   template <meta_ostream_t next_os, template <class> class... ps>
-  using each_to = transfer_pipe<
+  using each_to = meta_pipe_builder<
       stream_istream<Is, Os, protocols::forward_last>, next_os>;
 
-  // Trigger: run the whole chain now and return the final meta_stream.
-  // This is a member function template, so it is instantiated only when
-  // called -- constructing the pipe never runs it. The final result is a
-  // meta_stream; read the output with ::to (and ::to::type).
-  template <class...>
-  static constexpr auto transfer() noexcept -> transfer_until<Os, Is>;
+  // Terminal form. ::from is the self-terminating node istream, ready to be
+  // driven by any driver, e.g. transfer_until<os, ...::transfer::from>.
+  struct transfer {
+    using from = stream_istream<Is, Os>;
+  };
 };
 
 }  // namespace meta_pipe_node_details
 
-namespace pipe {
-using meta_pipe_node_details::transfer_pipe;
-
-// Entry point: pipe::transfer<is>::all_to<os>...
+// Public entry point (in meta_ios):
+//   meta_pipe<is>::all_to<os>::all_to<os>::transfer::from
 template <meta_istream_t Is>
-struct transfer {
+struct meta_pipe {
   template <meta_ostream_t os, template <class> class... ps>
-  using all_to = transfer_pipe<Is, os>;
+  using all_to = meta_pipe_node_details::meta_pipe_builder<Is, os>;
 };
 
-}  // namespace pipe
 }  // namespace meta_ios

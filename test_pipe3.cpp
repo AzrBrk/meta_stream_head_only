@@ -17,17 +17,18 @@ struct r_ostream_f {
 using r_ostream = meta_object<exp_list<>, r_ostream_f>;
 
 int main() {
-  // Full chain: map (passthrough) -> collect (r_ostream) -> terminal istream
-  using entry = pipe::transfer<meta_istream_list<int, double, char>>;
-  using after_map = entry::all_to<meta_iterator>;
-  // Trigger the chain; result is a meta_stream, output read via ::to
-  using ms = decltype(after_map::all_to<r_ostream>::transfer());
-  using collected = ms::to::type;
+  // Stage 1: mapping pipe; .transfer::from is the self-terminating node stream
+  using map_node =
+      meta_pipe<meta_istream_list<int, double, char>>::
+          all_to<meta_iterator>::transfer::from;
+
+  // Stage 2: collect that node stream into r_ostream
+  using collected = transfer_until<r_ostream, map_node>::to::type;
   static_assert(std::is_same_v<collected, exp_list<char, double, int>>,
                 "r_ostream should collect into exp_list<char,double,int>");
-  using final_is = meta_istream<collected>;
 
-  std::cout << "=== chained map -> collect, terminal istream ===" << std::endl;
+  std::cout << "=== map -> collect, terminal list ===" << std::endl;
+  using final_is = meta_istream<collected>;
   int count = 0;
   meta_transfer_until<meta_iterator, final_is>::for_each([&](auto s) {
     std::cout << s.target_type().name() << std::endl;
