@@ -20,7 +20,12 @@ int main() {
   // Full chain: map (passthrough) -> collect (r_ostream) -> terminal istream
   using entry = pipe::transfer<meta_istream_list<int, double, char>>;
   using after_map = entry::all_to<meta_iterator>;
-  using final_is = after_map::all_to<r_ostream>::from;
+  // Trigger the chain; result is a meta_stream, output read via ::to
+  using ms = decltype(after_map::all_to<r_ostream>::transfer());
+  using collected = ms::to::type;
+  static_assert(std::is_same_v<collected, exp_list<char, double, int>>,
+                "r_ostream should collect into exp_list<char,double,int>");
+  using final_is = meta_istream<collected>;
 
   std::cout << "=== chained map -> collect, terminal istream ===" << std::endl;
   int count = 0;

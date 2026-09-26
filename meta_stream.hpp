@@ -2714,32 +2714,25 @@ using stream_istream = meta_ret_object<
 // end_of_stream protocol, so filters that change element counts are fine.
 template <meta_istream_t Is, meta_ostream_t Os>
 struct transfer_pipe {
- private:
-  // Collecting stage: after Os consumes Is, the final to::type is an
-  // exp_list -- expose its elements as a basic istream.
-  template <class Final = transfer_until<Os, Is>>
-  static auto from_select(int)
-      -> meta_istream<typename Final::to::type>
-      requires exp_utilities::exp_list_details::
-          is_exp_list_based<typename Final::to::type>::value;
+  // Node stream for this stage: a self-terminating istream that feeds the
+  // next stage. Building the pipe (*_to) stays lazy; nothing runs here.
+  using from = stream_istream<Is, Os>;
 
-  // Mapping stage: expose the lazy, self-terminating per-element node stream.
-  template <class...>
-  static auto from_select(long) -> stream_istream<Is, Os>;
-
- public:
-  // Terminal output of this stage -- always self-terminating and usable
-  // directly by any driver: pipe::transfer<is>::all_to<os>...::from
-  using from = decltype(from_select(0));
-
-  // Append a stage passing every element through next_os
+  // Append a stage passing every element through next_os (lazy)
   template <meta_ostream_t next_os, template <class> class... ps>
   using all_to = transfer_pipe<stream_istream<Is, Os>, next_os>;
 
-  // Append a stage forwarding only the last produced element
+  // Append a stage forwarding only the last produced element (lazy)
   template <meta_ostream_t next_os, template <class> class... ps>
   using each_to = transfer_pipe<
       stream_istream<Is, Os, protocols::forward_last>, next_os>;
+
+  // Trigger: run the whole chain now and return the final meta_stream.
+  // This is a member function template, so it is instantiated only when
+  // called -- constructing the pipe never runs it. The final result is a
+  // meta_stream; read the output with ::to (and ::to::type).
+  template <class...>
+  static constexpr auto transfer() noexcept -> transfer_until<Os, Is>;
 };
 
 }  // namespace meta_pipe_node_details
