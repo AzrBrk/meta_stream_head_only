@@ -2714,8 +2714,23 @@ using stream_istream = meta_ret_object<
 // end_of_stream protocol, so filters that change element counts are fine.
 template <meta_istream_t Is, meta_ostream_t Os>
 struct transfer_pipe {
-  // Self-terminating istream for the current stage (continue chain / drive)
-  using from = stream_istream<Is, Os>;
+ private:
+  // Collecting stage: after Os consumes Is, the final to::type is an
+  // exp_list -- expose its elements as a basic istream.
+  template <class Final = transfer_until<Os, Is>>
+  static auto from_select(int)
+      -> meta_istream<typename Final::to::type>
+      requires exp_utilities::exp_list_details::
+          is_exp_list_based<typename Final::to::type>::value;
+
+  // Mapping stage: expose the lazy, self-terminating per-element node stream.
+  template <class...>
+  static auto from_select(long) -> stream_istream<Is, Os>;
+
+ public:
+  // Terminal output of this stage -- always self-terminating and usable
+  // directly by any driver: pipe::transfer<is>::all_to<os>...::from
+  using from = decltype(from_select(0));
 
   // Append a stage passing every element through next_os
   template <meta_ostream_t next_os, template <class> class... ps>
@@ -2725,17 +2740,6 @@ struct transfer_pipe {
   template <meta_ostream_t next_os, template <class> class... ps>
   using each_to = transfer_pipe<
       stream_istream<Is, Os, protocols::forward_last>, next_os>;
-
-  // Terminal reduction: run the current stage to the end and wrap the final
-  // to::type as a basic self-terminating istream. This is a nested class
-  // template, so it is instantiated ONLY when its ::type is requested --
-  // it never disturbs the streaming .from path.
-  // Usage: Pipe::template result_istream<>::type
-  template <class = void>
-  struct result_istream {
-    using type = meta_istream<
-        typename transfer_until<Os, Is>::to::type>;
-  };
 };
 
 }  // namespace meta_pipe_node_details

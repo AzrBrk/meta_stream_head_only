@@ -46,8 +46,8 @@ int main() {
   // pipe: align -> reverse-collect, terminal self-terminating istream
   using entry =
       pipe::transfer<meta_istream_list<int, std::string, char, std::string>>;
-  using final_is = entry::all_to<meta_aligned_iterator>
-                        ::all_to<r_ostream>::template result_istream<>::type;
+  using final_is =
+      entry::all_to<meta_aligned_iterator>::all_to<r_ostream>::from;
 
   // destroy in reverse construction order
   std::cout << "reverse destroy:" << std::endl;

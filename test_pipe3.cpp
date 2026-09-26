@@ -20,8 +20,7 @@ int main() {
   // Full chain: map (passthrough) -> collect (r_ostream) -> terminal istream
   using entry = pipe::transfer<meta_istream_list<int, double, char>>;
   using after_map = entry::all_to<meta_iterator>;
-  using after_collect = after_map::all_to<r_ostream>;
-  using final_is = after_collect::template result_istream<>::type;
+  using final_is = after_map::all_to<r_ostream>::from;
 
   std::cout << "=== chained map -> collect, terminal istream ===" << std::endl;
   int count = 0;
