@@ -1923,6 +1923,14 @@ struct meta_stream {
   using to_t = typename to::type;
   using cache = typename stream_cache<From>::type;
 
+  // Whether this stream position has no more input to process.
+  // True for end-marker states (e.g. index_counter<0>) or when the
+  // cache resolved to end_of_list (exp_list exhausted).
+  static constexpr bool end =
+      is_end_stream<from_t> ||
+      std::is_same_v<cache, literal_types::end_of_list>;
+  using end_type = literal_types::end_of_list;
+
   template <class... Arg>
   using invoke_to = meta_stream<meta_invoke<To, Arg...>, from>;
 
@@ -2131,8 +2139,20 @@ struct meta_stream_s_f {
   };
 
  public:
+  // End guard: an ended stream stays unchanged (idempotent), so callers
+  // can apply freely without instantiating the op logic on end_of_list.
+  // Non-meta_stream types (no ::end) fall through to update_impl.
+  template <class Stream, class = void>
+  struct apply_impl {
+    using type = typename update_impl<Stream>::type;
+  };
+  template <class Stream>
+  struct apply_impl<Stream, std::enable_if_t<Stream::end>> {
+    using type = Stream;
+  };
+
   template <class mo_stream, class...>
-  using apply = typename update_impl<mo_stream>::type;
+  using apply = typename apply_impl<mo_stream>::type;
 };
 
 struct meta_always_false_c_o {
@@ -2652,111 +2672,82 @@ struct reflected_member_types {
 #endif
 
 namespace meta_pipe_node_details {
-struct advance_node {
-  template <class this_pipe>
-  struct advance_impl {
-    using stream_invoke =
-        transfer<1, typename this_pipe::to, typename this_pipe::from>;
-    using from = typename stream_invoke::from;
-    using to = typename stream_invoke::to;
-  };
-  template <class this_pipe>
-  using apply = io_stream_transform_details::meta_stream<
-      typename advance_impl<this_pipe>::to,
-      typename advance_impl<this_pipe>::from>;
-};
-
+// ret_from_node: extracts the value handed to the next stage.
+// The node state holds an UNPROCESSED input, so extraction first advances
+// a copy (without mutating the stored state), then reads the resulting to.
 template <template <class> class... ps>
 struct ret_from_node {
-  template <class this_pipe>
-  using apply = meta_fold<this_pipe, protocols::stream_to_t, ps...>;
-};
-
-template <meta_istream_t is, meta_ostream_t os, template <class> class... ps>
-using stream_istream =
-    meta_ret_object<transfer<1, os, is>, advance_node, ret_from_node<ps...>>;
-
-template <class this_pipe>
-using skip_node = io_stream_transform_details::meta_stream<
-    typename this_pipe::to,
-    meta_invoke<invoke_if<(exp_size<typename this_pipe::from::type> > 0)>,
-                typename this_pipe::from>>;
-
-using meta_nothing = meta_objects::meta_empty_o;
-template <class meta_function_type, typename reset_f>
-struct skip_advance_node {
-  template <class this_pipe>
-  struct advance_impl {
-    using stream_invoke = meta_all_transfer<
-        std::conditional_t<!std::is_same_v<reset_f, meta_nothing>,
-                           typename this_pipe::to::template meta_set<
-                               meta_invoke<reset_f, this_pipe>>,
-                           typename this_pipe::to>,
-        typename this_pipe::from, meta_function_type>;
-    using from = typename skip_node<stream_invoke>::from;
-    using to = typename skip_node<stream_invoke>::to;
+ private:
+  // Default: state not ended -- advance a copy, read to, run user protocols
+  template <class Pipe, class = void>
+  struct impl {
+    using stepped = meta_invoke<
+        io_stream_transform_details::meta_stream_s_f, Pipe>;
+    using type = meta_fold<stepped, protocols::stream_to_t, ps...>;
   };
+
+  // State ended: emit end_of_list directly. It must never pass through
+  // stream_to_t or the user protocols -- the fold stops right here,
+  // mirroring how fold_result stops on a skip_signal.
+  template <class Pipe>
+  struct impl<Pipe, std::enable_if_t<Pipe::end>> {
+    using type = literal_types::end_of_list;
+  };
+
+ public:
   template <class this_pipe>
-  using apply = io_stream_transform_details::meta_stream<
-      typename advance_impl<this_pipe>::to,
-      typename advance_impl<this_pipe>::from>;
+  using apply = typename impl<this_pipe>::type;
 };
 
-template <meta_istream_t is, meta_ostream_t os, class break_f, class reset_f,
-          template <class> class... ps>
-using skip_stream_istream =
-    meta_ret_object<skip_node<meta_all_transfer<os, is, break_f>>,
-                    skip_advance_node<break_f, reset_f>, ret_from_node<ps...>>;
+// stream_istream: wraps (is, os) into a self-terminating istream.
+//  - state   = meta_stream<os, is> before the first step (unprocessed)
+//  - advance = meta_stream_s_f (plain/states ops, idempotent on end)
+//  - extract = ret_from_node (advances a copy then reads to; end -> end_of_list)
+template <meta_istream_t is, meta_ostream_t os, template <class> class... ps>
+using stream_istream = meta_ret_object<
+    io_stream_transform_details::meta_stream<os, is>,
+    io_stream_transform_details::meta_stream_s_f,
+    ret_from_node<ps...>>;
 
-template <std::size_t N, meta_istream_t is, meta_ostream_t os,
-          template <class> class... ps>
+// transfer_pipe: holds the input istream and the current stage ostream.
+// Termination needs no iteration count -- it propagates through the
+// end_of_stream protocol, so filters that change element counts are fine.
+template <meta_istream_t Is, meta_ostream_t Os>
 struct transfer_pipe {
-  template <meta_ostream_t another_os, template <class> class... other_ps>
-  using all_to =
-      transfer_pipe<exp_size<typename is::type>, stream_istream<is, os, ps...>,
-                    another_os, other_ps...>;
-  template <meta_ostream_t another_os, template <class> class... other_ps>
-  using each_to =
-      transfer_pipe<exp_size<typename is::type>,
-                    stream_istream<is, os, protocols::forward_last, ps...>,
-                    another_os, other_ps...>;
+  // Self-terminating istream for the current stage (continue chain / drive)
+  using from = stream_istream<Is, Os>;
 
-  template <std::size_t Nc, meta_ostream_t another_os,
-            template <class> class... other_ps>
-  using to =
-      transfer_pipe<Nc, stream_istream<is, os, ps...>, another_os, other_ps...>;
+  // Append a stage passing every element through next_os
+  template <meta_ostream_t next_os, template <class> class... ps>
+  using all_to = transfer_pipe<stream_istream<Is, Os>, next_os>;
 
-  template <std::size_t Nc, meta_ostream_t another_os, class break_f,
-            typename reset_f, template <class> class... other_ps>
-  using skip_to =
-      transfer_pipe<Nc, skip_stream_istream<is, os, break_f, reset_f, ps...>,
-                    another_os, other_ps...>;
-  using from = stream_istream<is, os, ps...>;
-  using transfer = meta_ios::transfer<N, os, is>;
-  template <class meta_function_type>
-  using skip = meta_ios::meta_all_transfer<os, is, meta_function_type>;
+  // Append a stage forwarding only the last produced element
+  template <meta_ostream_t next_os, template <class> class... ps>
+  using each_to = transfer_pipe<
+      stream_istream<Is, Os, protocols::forward_last>, next_os>;
+
+  // Terminal reduction: run the current stage to the end and wrap the final
+  // to::type as a basic self-terminating istream. This is a nested class
+  // template, so it is instantiated ONLY when its ::type is requested --
+  // it never disturbs the streaming .from path.
+  // Usage: Pipe::template result_istream<>::type
+  template <class = void>
+  struct result_istream {
+    using type = meta_istream<
+        typename transfer_until<Os, Is>::to::type>;
+  };
 };
 
 }  // namespace meta_pipe_node_details
 
 namespace pipe {
-using meta_objects::meta_timer_object_details::meta_always_continue;
-using meta_pipe_node_details::skip_stream_istream;
 using meta_pipe_node_details::transfer_pipe;
-template <meta_istream_t is>
+
+// Entry point: pipe::transfer<is>::all_to<os>...
+template <meta_istream_t Is>
 struct transfer {
-  template <meta_ostream_t another_os, template <class> class... other_ps>
-  using all_to =
-      transfer_pipe<exp_size<typename is::type>, is, another_os, other_ps...>;
-
-  template <std::size_t Nc, meta_ostream_t another_os,
-            template <class> class... other_ps>
-  using to = transfer_pipe<Nc, is, another_os, other_ps...>;
-
-  template <meta_ostream_t another_os, class break_f, class reset_f,
-            template <class> class... other_ps>
-  using skip_to = pipe::transfer<
-      skip_stream_istream<is, another_os, break_f, reset_f, other_ps...>>;
+  template <meta_ostream_t os, template <class> class... ps>
+  using all_to = transfer_pipe<Is, os>;
 };
 
 }  // namespace pipe
