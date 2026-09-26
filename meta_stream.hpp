@@ -2061,25 +2061,54 @@ struct meta_stream_s_f {
         meta_states_object<typename To::type, typename To::function,
                            typename To::changed_pred, cur_flags, To::size + 1>;
 
-    // from side: controlled by opCallIs
-    // if call_is and !pred, advance from; else stay
-    using from_advancing = meta_invoke<From>;
-    using from_stay = From;
-    using next_from = std::conditional_t<is_idle, from_advancing, from_stay>;
+    // choose_from<Advance>: select from type based on whether to advance
+    template <bool Advance, class FromT>
+    struct choose_from;
 
-    // ostream side: controlled by opCallOs / opSkip
-    // 1. call_os: force-call function directly
-    using ostream_called = typename To::template meta_set<
-        meta_invoke<typename To::function, typename To::type, cache_t>>;
-    // 2. skip: ostream unchanged
-    using ostream_skipped = recorded;
-    // 3. normal: ostream receives cache
-    using ostream_normal = meta_object_invoke<To, From>;
+    template <class FromT>
+    struct choose_from<true, FromT> {
+      using type = meta_invoke<FromT>;
+    };
 
-    // choose ostream behavior
-    using next_ostream = std::conditional_t<
-        call_os, ostream_called,
-        std::conditional_t<skip, ostream_skipped, ostream_normal>>;
+    template <class FromT>
+    struct choose_from<false, FromT> {
+      using type = FromT;
+    };
+
+    // next_from: controlled by opCallIs
+    using next_from = typename choose_from<is_idle, From>::type;
+
+    // choose_ostream<CallOs, Skip>: select ostream type
+    template <bool CallOs, bool Skip, class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream;
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<true, true, ToT, FromT, RecordedT, CacheT> {
+      // call_os takes priority
+      using type = typename ToT::template meta_set<
+          meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
+    };
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<true, false, ToT, FromT, RecordedT, CacheT> {
+      using type = typename ToT::template meta_set<
+          meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
+    };
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<false, true, ToT, FromT, RecordedT, CacheT> {
+      // skip: ostream unchanged
+      using type = RecordedT;
+    };
+
+    template <class ToT, class FromT, class RecordedT, class CacheT>
+    struct choose_ostream<false, false, ToT, FromT, RecordedT, CacheT> {
+      // normal: ostream receives cache
+      using type = meta_object_invoke<ToT, FromT>;
+    };
+
+    // next_ostream: controlled by opCallOs / opSkip
+    using next_ostream = typename choose_ostream<call_os, skip, To, From, recorded, cache_t>::type;
 
     using type = meta_stream<next_ostream, next_from>;
   };
