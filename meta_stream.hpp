@@ -1259,8 +1259,9 @@ struct meta_looper_impl {
             std::invoke_result_t<decltype(f), stage_t, arg_types...>;
 
         if constexpr (std::is_void_v<return_type>) {
-          // 返回 void：调用后如果需要继续，则递归；否则自然结束。
-          if constexpr (_continue_) {
+          // 返回 void：和非 void 分支一样，检查下一层是否继续
+          // 下一层继续：调用后递归；下一层停止：调用后直接结束
+          if constexpr (track_apply_t::_continue_) {
             std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
             return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
           } else {
@@ -1301,12 +1302,14 @@ struct meta_looper_impl {
             std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
 
         if constexpr (std::is_void_v<return_type>) {
-          if constexpr (_continue_) {
+          // 和非 void 分支一样，检查下一层是否继续且还有参数
+          if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
             std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
-            if constexpr (sizeof...(arg_types)) {
-              return track_apply_t::for_each_forward(
-                  f, std::forward<arg_types>(args)...);
-            }
+            return track_apply_t::for_each_forward(
+                f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{},
+                               std::forward<first_arg_type>(first));
           }
         } else {
           if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
@@ -2076,8 +2079,11 @@ struct meta_stream_s_f {
     };
 
     // next_from: controlled by opCallIs
-    using next_from = typename choose_from<is_idle, From>::type;
-
+    // next_from: controlled by opCallIs
+    // normal case (pred=true): always advance from
+    // when pred=false: advance only if opCallIs is on
+    static constexpr bool advance_from = pred || is_idle;
+    using next_from = typename choose_from<advance_from, From>::type;
     // choose_ostream<CallOs, Skip>: select ostream type
     template <bool CallOs, bool Skip, class ToT, class FromT, class RecordedT, class CacheT>
     struct choose_ostream;
