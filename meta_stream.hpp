@@ -1358,6 +1358,12 @@ using meta_looper =
 }  // namespace meta_loop
 
 namespace meta_ios {
+// Forward declaration: meta_stream_skip_signal is defined later in protocols,
+// but observers / io_stream_transform_details must name it in specializations.
+namespace protocols {
+struct meta_stream_skip_signal;
+}  // namespace protocols
+
 template <bool End, class EndType = exp_utilities::literal_types::end_of_list>
 struct end_of_stream {
   static constexpr bool end = End;
@@ -1437,6 +1443,9 @@ struct observe_os_change {
   struct apply {
     using cache_t = typename ThisObj::cache;
     static constexpr bool value = [] {
+      // When the cache is a skip_signal and the ostream consumes it, the update
+      // leaves the ostream unchanged, so the preview below compares equal and
+      // this naturally reports "no change" -- no skip-specific special case.
       if constexpr (observe_details::to_changed<typename ThisObj::to,
                                                 cache_t>::value)
         return true;
@@ -1882,12 +1891,6 @@ using meta_objects::meta_timer_object;
 using meta_objects::meta_timer_object_details::meta_always_continue;
 using namespace exp_utilities;
 
-// Forward declaration: meta_stream_skip_signal is defined later in
-// protocols, but io_stream_transform_details must name it in specializations.
-namespace protocols {
-struct meta_stream_skip_signal;
-}  // namespace protocols
-
 namespace io_stream_transform_details {
 namespace io_stream_traits {
 template <class T>
@@ -2007,7 +2010,7 @@ constexpr std::uint64_t OP_OS_IDLE = 1ULL << 59;   // on: force-call ostream fun
 constexpr std::uint64_t OP_IS_SKIP = 1ULL << 60;   // on: skip when istream ret meta_stream_skip_signal
 constexpr std::uint64_t OP_TIMER_DEC = 1ULL << 62;
 constexpr std::uint64_t OP_BREAK = 1ULL << 63;     // on: break stream when pred is false
-constexpr std::uint64_t OP_DEFAULT = OP_SKIP | OP_IS_IDLE;  // default: skip + call_is on
+constexpr std::uint64_t OP_DEFAULT = OP_SKIP | OP_IS_IDLE | OP_IS_SKIP;  // default: skip + call_is + consume-skip on
 
 // short names
 constexpr std::uint64_t opSkip = OP_SKIP;
@@ -2016,13 +2019,31 @@ constexpr std::uint64_t opCallIs = OP_IS_IDLE;
 constexpr std::uint64_t opCallOs = OP_OS_IDLE;
 constexpr std::uint64_t opBreak = OP_BREAK;
 constexpr std::uint64_t opIsSkip = OP_IS_SKIP;
+
+// --- mask composition used by stream_op ---
+// Spec encodes two sets in one uint64:
+//   band 56..63 : bits forced ON  (enable)
+//   band 48..55 : bits forced OFF (deactivate, mirrored from 56..63)
+// enable: force bits on; stays in the 56..63 band.
+consteval std::uint64_t enable(std::uint64_t bits) { return bits; }
+// deactivate: force bits off; mirrors 56+k -> 48+k (internal encoding).
+consteval std::uint64_t deactivate(std::uint64_t bits) { return bits >> 8; }
+// compose: keep OP_DEFAULT, force enabled bits on, deactivated bits off.
+consteval std::uint64_t compose(std::uint64_t spec) {
+  constexpr std::uint64_t OP_BAND = 0xFFULL << 56;
+  const std::uint64_t set = spec & OP_BAND;
+  const std::uint64_t clear = (spec & (0xFFULL << 48)) << 8;  // mirror back
+  return (OP_DEFAULT | set) & ~clear;
+}
 }  // namespace stream_op_bits
 
 
-// stream_op<Code>: base class for user-defined states types, holds opr_code
-template <std::uint64_t Code = stream_op_bits::OP_DEFAULT>
+// stream_op<Spec>: base class for user-defined states. Compose Spec with
+// stream_op_bits::enable() / deactivate(); unspecified bits keep OP_DEFAULT.
+// Spec = 0 (the default) gives the pure OP_DEFAULT behaviour.
+template <std::uint64_t Spec = 0>
 struct stream_op {
-  static constexpr std::uint64_t opr_code = Code;
+  static constexpr std::uint64_t opr_code = stream_op_bits::compose(Spec);
 };
 // operator_code<bits...>: those bits are turned OFF (triggered)
 template <std::uint64_t... Bits>
@@ -2038,12 +2059,17 @@ struct make_base {
 };
 
 
-// meta_states concept: check if a type has apply / on_changed / pred
+// meta_states: a states type declares its starting object via ::type and provides
+// apply / on_changed / pred over that object (probed with States::type).
 template <class States>
 concept meta_states = requires {
-  typename States::template apply<std::integral_constant<std::size_t, 0>, std::integral_constant<std::size_t, 0>>;
-  typename States::template on_changed<std::integral_constant<std::size_t, 0>, std::integral_constant<std::size_t, 0>>;
-  typename States::template pred<std::integral_constant<std::size_t, 0>, std::integral_constant<std::size_t, 0>>;
+  typename States::type;
+  typename States::template apply<typename States::type,
+                                  std::integral_constant<std::size_t, 0>>;
+  typename States::template on_changed<typename States::type,
+                                       std::integral_constant<std::size_t, 0>>;
+  typename States::template pred<typename States::type,
+                                 std::integral_constant<std::size_t, 0>>;
 };
 
 // meta_states_with_opcode concept: also has opr_code
@@ -2089,11 +2115,43 @@ using meta_make_states = typename make_states_type<T>::type;
 // Reads opr_code from to::type, applies skip/is_idle/break bits.
 struct meta_stream_s_f {
  private:
+  // Whether ostream To consumes a meta_stream_skip_signal (the opIsSkip bit).
+  // Default ON for every ostream; it is OFF only when To explicitly supplies an
+  // opr_code with OP_IS_SKIP cleared, meaning it wants to receive skip_signal.
+  template <class To>
+  static consteval bool consumes_skip_v() {
+    if constexpr (requires { typename To::changed_pred; }) {
+      // states ostream: opr_code lives in the high bits of flags
+      constexpr std::uint64_t code =
+          To::flags & ~meta_states_details::FLAGS_LOW_MASK;
+      return (code & stream_op_bits::OP_IS_SKIP) != 0;
+    } else if constexpr (requires { To::opr_code; }) {
+      return (To::opr_code & stream_op_bits::OP_IS_SKIP) != 0;
+    } else {
+      return true;  // plain ostream with no opr_code: consume by default
+    }
+  }
+
+  // plain (non-states) ostream update
+  template <class To, class From, class = void>
+  struct plain_update {
+    using type = meta_stream<
+        meta_object_invoke<To, From>, meta_invoke<From>>;
+  };
+  // cache is skip_signal and the ostream consumes it: ostream stays unchanged
+  // and the input advances (the skip is consumed so the loop progresses)
+  template <class To, class From>
+  struct plain_update<To, From, std::enable_if_t<
+      std::is_same_v<typename meta_stream<To, From>::cache,
+                     protocols::meta_stream_skip_signal> &&
+          consumes_skip_v<To>()>> {
+    using type = meta_stream<To, meta_invoke<From>>;
+  };
+
   template <class Stream, class = void>
   struct update_impl {
-    using type = meta_stream<
-        meta_object_invoke<typename Stream::to, typename Stream::from>,
-        meta_invoke<typename Stream::from>>;
+    using type = typename plain_update<typename Stream::to,
+                                      typename Stream::from>::type;
   };
 
   // To is a meta_states_object
@@ -2396,6 +2454,9 @@ using io_stream_transform_details::stream_op_bits::opCallIs;
 using io_stream_transform_details::stream_op_bits::opCallOs;
 using io_stream_transform_details::stream_op_bits::opBreak;
 using io_stream_transform_details::stream_op_bits::opIsSkip;
+using io_stream_transform_details::stream_op_bits::enable;
+using io_stream_transform_details::stream_op_bits::deactivate;
+using io_stream_transform_details::stream_op_bits::compose;
 
 using io_stream_transform_details::make_base;
 using io_stream_transform_details::operator_code;
@@ -2632,7 +2693,10 @@ template <template <class> class P, template <class> class... PS>
 using has_protocol = meta_all_transfer<
     meta_filter_ostream<exp_list<>,
                         protocols::only_arg<template_equal_with<P>>>,
-    meta_istream_list<protocol_container<PS>...>>::to_t;
+    meta_istream_list<protocol_container<PS>...>,
+    // Early exit: as soon as one matching protocol is collected (result list
+    // length 1), stop -- no need to walk the rest of the protocol pack.
+    protocols::only_stream_to_unref<length_is<1>>>::to_t;
 
 template <template <class> class P, template <class> class... PS>
 constexpr bool has_no_protocol_v = length_equal<has_protocol<P, PS...>, 0>;
@@ -2802,6 +2866,12 @@ struct ret_from_node {
       protocol_auto_unref_details::has_no_protocol_v<protocols::stream_cache_t,
                                                      ps...> &&
       protocol_auto_unref_details::has_no_protocol_v<protocols::stream_no_unref,
+                                                     ps...> &&
+      // wait_for_end consumes the WHOLE meta_stream (it reads ::from to detect
+      // exhaustion) and chains its own extraction, so it suppresses the auto
+      // stream_to_t just like stream_no_unref; the user orders any following
+      // stream_to_t explicitly after it.
+      protocol_auto_unref_details::has_no_protocol_v<protocols::wait_for_end,
                                                      ps...>;
 
   // Fold the stepped copy with fold_result, which stops (and stays) on
@@ -2862,23 +2932,28 @@ struct meta_pipe_builder {
 
   // Append a stage forwarding only the last element of a produced list
   // (output protocol = forward_last)
-  template <meta_ostream_t next_os>
+  template <meta_ostream_t next_os, template <class> class... Ps>
   using each_to = meta_pipe_builder<
-      stream_istream<CurNode, next_os, protocols::forward_last>>;
+      stream_istream<CurNode, next_os, Ps..., protocols::forward_last>>;
 
   // The node istream produced so far -- usable directly by any driver.
   // It stays UNFLOWED: composing all_to/each_to only builds types.
   using from = CurNode;
 
-  // run: drive the whole unflowed pipe with a user-supplied final ostream.
-  //   meta_pipe<is>::all_to<os>...::run<final_os>::for_each(f)
-  // FinalOs may be a meta_states_object carrying any stream_op / protocol,
-  // so the pipe itself never has to assume the product is a type list.
-  // Equals meta_transfer_until<FinalOs, CurNode>; its ::type/::to is the
-  // final meta_stream, and the pipe's skip_signal / wait_for_end design and
-  // protocols stay fully active. Extra... optionally forwards BF/Observer/...
-  template <meta_ostream_t FinalOs>
-  using run = meta_transfer_until<FinalOs, CurNode>;
+  // run_with: attach FinalOs as a stage and flow. The protocols Ps are folded on
+  // the IS-side node (stream_istream), never on the output: wait_for_end makes
+  // every intermediate collection emit skip_signal, so it is neither observed
+  // nor forwarded and FinalOs is not asked to process a partial result; once the
+  // container is full (input exhausted), stream_to_t reads it and the remaining
+  // Ps transform it (e.g. to_meta_array_t). A forwarding meta_iterator drives
+  // that node with the built-in for_each, which then fires only for the final
+  // value:
+  //   ...::run_with<meta_rostream<>, wait_for_end, stream_to_t,
+  //                to_meta_array_t>::for_each(f);
+  template <meta_ostream_t FinalOs, template <class> class... Ps>
+  using run_with = meta_transfer_until<
+      meta_iterator,
+      stream_istream<CurNode, FinalOs, Ps...>>;
 
   // Kept for the transfer::from spelling
   struct transfer {
@@ -2895,6 +2970,11 @@ struct meta_pipe {
   template <meta_ostream_t os, template <class> class... Ps>
   using all_to = meta_pipe_node_details::meta_pipe_builder<
       meta_pipe_node_details::stream_istream<Is, os, Ps...>>;
+
+  // Attach FinalOs (protocols folded on the is-side node) and flow.
+  template <meta_ostream_t FinalOs, template <class> class... Ps>
+  using run_with = meta_pipe_node_details::meta_pipe_builder<Is>
+      ::template run_with<FinalOs, Ps...>;
 };
 
 }  // namespace meta_ios

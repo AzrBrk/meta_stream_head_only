@@ -11,18 +11,14 @@ using namespace meta_objects;
 using raw = meta_istream_list<int, std::string, char, std::string>;
 
 // ===== ONE-SHOT pipe =====
-// aligned -> rostream collecting the full reversed list (wait_for_end)
-using ro_node =
-    meta_pipe<raw>
-        ::all_to<meta_aligned_iterator>
-        ::all_to<meta_rostream<>, protocols::wait_for_end,
-                 protocols::stream_to_t>::from;
-// ro_node yields: skip x3, reversed list L, eol
-
-// drive collection lazily, then read the final reversed list
-// transfer_until::to = final ostream (meta_iterator state); its ::type is L
-using driven = transfer_until<meta_iterator, ro_node>::to;
-using L = driven::type;
+// aligned stage, then rostream collects it; wait_for_end skips partial
+// collections (not observed/forwarded) and stream_to_t reads the full reversed
+// list once the container is full.
+using run_t =
+    meta_pipe<raw>::all_to<meta_aligned_iterator>::run_with<
+        meta_rostream<>, protocols::wait_for_end, protocols::stream_to_t>;
+// the driven to::type is the full reversed aligned list L
+using L = typename run_t::type::to::type;
 
 using a0 = meta_aligned_iterator_details::seek_to<0, int>;
 using a8 = meta_aligned_iterator_details::seek_to<4, std::string>;
