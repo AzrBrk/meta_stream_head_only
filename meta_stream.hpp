@@ -2751,6 +2751,22 @@ struct wait_for_end_impl<
 };
 template <class M>
 using wait_for_end = typename wait_for_end_impl<M>::type;
+
+// wait_for_end_to_t: while the input is not exhausted -> meta_stream_skip_signal;
+// once exhausted -> the stream's to_t (to::type). This fuses wait_for_end with
+// stream_to_t. No from/cache variants are provided: after exhaustion both are
+// meaningless.
+template <class M, class = void>
+struct wait_for_end_to_t_impl {
+  using type = meta_stream_skip_signal;
+};
+template <class M>
+struct wait_for_end_to_t_impl<
+    M, std::enable_if_t<exhausted_v<typename M::from::type>>> {
+  using type = typename M::to::type;
+};
+template <class M>
+using wait_for_end_to_t = typename wait_for_end_to_t_impl<M>::type;
 }  // namespace protocols
 
 // helper to call a function with a protocol folded stream
@@ -2821,7 +2837,9 @@ constexpr auto protocol_call(auto&& f) {
   if constexpr (has_no_protocol_v<protocols::stream_to_t, PS...> &&
                 has_no_protocol_v<protocols::stream_from_t, PS...> &&
                 has_no_protocol_v<protocols::stream_cache_t, PS...> &&
-                has_no_protocol_v<protocols::stream_no_unref, PS...>) {
+                has_no_protocol_v<protocols::stream_no_unref, PS...> &&
+                has_no_protocol_v<protocols::wait_for_end, PS...> &&
+                has_no_protocol_v<protocols::wait_for_end_to_t, PS...>) {
     return [&f]<class in_stream_t, class... Args>(in_stream_t, Args&&... args) {
       using fold_result_t =
           fold_result<in_stream_t, protocols::stream_to_t, PS...>;
@@ -2848,7 +2866,9 @@ constexpr auto protocol_call(auto&& f) {
   if constexpr (has_no_protocol_v<protocols::stream_to_t, PS...> &&
                 has_no_protocol_v<protocols::stream_from_t, PS...> &&
                 has_no_protocol_v<protocols::stream_cache_t, PS...> &&
-                has_no_protocol_v<protocols::stream_no_unref, PS...>) {
+                has_no_protocol_v<protocols::stream_no_unref, PS...> &&
+                has_no_protocol_v<protocols::wait_for_end, PS...> &&
+                has_no_protocol_v<protocols::wait_for_end_to_t, PS...>) {
     return [&f]<class in_stream_t, class... Args>(
                in_stream_t, Args&&... args) -> any_caster<R> {
       using fold_result_t =
@@ -2964,7 +2984,11 @@ struct ret_from_node {
       // stream_to_t just like stream_no_unref; the user orders any following
       // stream_to_t explicitly after it.
       protocol_auto_unref_details::has_no_protocol_v<protocols::wait_for_end,
-                                                     ps...>;
+                                                     ps...> &&
+      // wait_for_end_to_t likewise consumes the whole meta_stream and itself
+      // yields to_t after exhaustion.
+      protocol_auto_unref_details::has_no_protocol_v<
+          protocols::wait_for_end_to_t, ps...>;
 
   // Fold the stepped copy with fold_result, which stops (and stays) on
   // meta_stream_skip_signal, so the signal propagates out untouched.
