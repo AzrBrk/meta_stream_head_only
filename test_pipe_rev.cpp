@@ -15,8 +15,10 @@ using raw = meta_istream_list<int, std::string, char, std::string>;
 // collections (not observed/forwarded) and stream_to_t reads the full reversed
 // list once the container is full.
 using run_t =
-    meta_pipe<raw>::all_to<meta_aligned_iterator>::run_with<
-        meta_rostream<>, protocols::wait_for_end, protocols::stream_to_t>;
+    meta_pipe<raw>::all_to<meta_aligned_iterator>
+        ::all_to<meta_rostream<>, protocols::wait_for_end,
+                 protocols::stream_to_t>
+        ::run<meta_iterator>;
 // the driven to::type is the full reversed aligned list L
 using L = typename run_t::type::to::type;
 
