@@ -812,6 +812,12 @@ namespace meta_fold_detail {
 template <class T, template <class> class... Fs>
 struct impl {};
 
+// no metafunction: result is T itself
+template <class T>
+struct impl<T> {
+  using type = T;
+};
+
 template <class T, template <class> class F>
 struct impl<T, F> {
   using type = F<T>;
@@ -1251,7 +1257,7 @@ struct meta_looper_impl {
     using type = typename track_apply_t::type;
 
     template <class... arg_types>
-    static constexpr auto for_each(auto&& f, arg_types&&... args) {
+    static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
       // 把当前阶段类型抽出来，后面推导返回类型时更干净。
       using stage_t = typename result_stage_o::type;
 
@@ -1293,9 +1299,51 @@ struct meta_looper_impl {
       }
     }
 
+    // Overload: fold a pack of unary metafunctions into each stage BEFORE the
+    // value is handed to the callable f. Only the value passed to f is folded;
+    // the loop machinery is unchanged.
+    template <template <class> class... Ps, class... arg_types>
+      requires(sizeof...(Ps) > 0)
+    static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
+      using raw_stage = typename result_stage_o::type;
+      using stage_t = meta_fold<raw_stage, Ps...>;
+
+      if constexpr (!observe_result::value) {
+        if constexpr (_continue_) {
+          return track_apply_t::template for_each<Ps...>(
+              f, std::forward<arg_types>(args)...);
+        } else {
+          return;
+        }
+      } else {
+        using return_type =
+            std::invoke_result_t<decltype(f), stage_t, arg_types...>;
+        if constexpr (std::is_void_v<return_type>) {
+          if constexpr (track_apply_t::_continue_) {
+            std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+            return track_apply_t::template for_each<Ps...>(
+                f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{},
+                               std::forward<arg_types>(args)...);
+          }
+        } else {
+          if constexpr (track_apply_t::_continue_) {
+            (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+            return track_apply_t::template for_each<Ps...>(
+                f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{},
+                               std::forward<arg_types>(args)...);
+          }
+        }
+      }
+    }
+
     template <class first_arg_type, class... arg_types>
-    static constexpr auto for_each_forward(auto&& f, first_arg_type&& first,
-                                           arg_types&&... args) {
+    static constexpr decltype(auto) for_each_forward(auto&& f,
+                                                     first_arg_type&& first,
+                                                     arg_types&&... args) {
       // 同样抽出当前阶段类型。
       using stage_t = typename result_stage_o::type;
 
@@ -1327,6 +1375,50 @@ struct meta_looper_impl {
             (void)std::invoke(f, stage_t{},
                               std::forward<first_arg_type>(first));
             return track_apply_t::for_each_forward(
+                f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{},
+                               std::forward<first_arg_type>(first));
+          }
+        }
+      }
+    }
+
+    // Overload: unary metafunctions folded into each stage before calling f.
+    template <template <class> class... Ps, class first_arg_type,
+              class... arg_types>
+      requires(sizeof...(Ps) > 0)
+    static constexpr decltype(auto) for_each_forward(
+        auto&& f, first_arg_type&& first, arg_types&&... args) {
+      using raw_stage = typename result_stage_o::type;
+      using stage_t = meta_fold<raw_stage, Ps...>;
+
+      if constexpr (!observe_result::value) {
+        if constexpr (_continue_ && sizeof...(arg_types)) {
+          return track_apply_t::template for_each_forward<Ps...>(
+              f, std::forward<arg_types>(args)...);
+        } else {
+          return;
+        }
+      } else {
+        using return_type =
+            std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
+        if constexpr (std::is_void_v<return_type>) {
+          if constexpr (track_apply_t::_continue_ &&
+                        sizeof...(arg_types)) {
+            std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+            return track_apply_t::template for_each_forward<Ps...>(
+                f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{},
+                               std::forward<first_arg_type>(first));
+          }
+        } else {
+          if constexpr (track_apply_t::_continue_ &&
+                        sizeof...(arg_types)) {
+            (void)std::invoke(f, stage_t{},
+                              std::forward<first_arg_type>(first));
+            return track_apply_t::template for_each_forward<Ps...>(
                 f, std::forward<arg_types>(args)...);
           } else {
             return std::invoke(f, stage_t{},
@@ -2950,10 +3042,12 @@ struct meta_pipe_builder {
   // value:
   //   ...::run_with<meta_rostream<>, wait_for_end, stream_to_t,
   //                to_meta_array_t>::for_each(f);
-  template <meta_ostream_t FinalOs, template <class> class... Ps>
-  using run_with = meta_transfer_until<
-      meta_iterator,
-      stream_istream<CurNode, FinalOs, Ps...>>;
+  // run: flow the composed pipe -- Os accepts CurNode. It is exactly
+  // meta_transfer_until and keeps its built-in for_each. Pass unary
+  // metafunctions to for_each to fold the stage before the callable:
+  //   ...::all_to<...>::run<final_os>::for_each<P...>(f);
+  template <meta_ostream_t Os>
+  using run = meta_transfer_until<Os, CurNode>;
 
   // Kept for the transfer::from spelling
   struct transfer {
@@ -2971,10 +3065,10 @@ struct meta_pipe {
   using all_to = meta_pipe_node_details::meta_pipe_builder<
       meta_pipe_node_details::stream_istream<Is, os, Ps...>>;
 
-  // Attach FinalOs (protocols folded on the is-side node) and flow.
-  template <meta_ostream_t FinalOs, template <class> class... Ps>
-  using run_with = meta_pipe_node_details::meta_pipe_builder<Is>
-      ::template run_with<FinalOs, Ps...>;
+  // Flow: Os accepts the composed pipe (built-in for_each).
+  template <meta_ostream_t Os>
+  using run = meta_pipe_node_details::meta_pipe_builder<Is>
+      ::template run<Os>;
 };
 
 }  // namespace meta_ios
