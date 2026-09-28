@@ -2523,7 +2523,7 @@ using meta_ristream = io_stream_transform_details::meta_reverse_istream_detail::
 template <class... Tys>
 using meta_istream_list = meta_istream<exp_list<Tys...>>;
 
-template <class type_list>
+template <class type_list = exp_list<>>
 using meta_ostream =
     io_stream_transform_details::meta_basic_ostream_detail::meta_basic_ostream<
         type_list>;
