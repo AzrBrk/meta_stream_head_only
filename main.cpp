@@ -9,7 +9,7 @@ using namespace meta_ios;
 using namespace exp_utilities;
 using namespace meta_objects;
 
-struct default_t{};
+// default_t is provided by meta_stream (and used by states_base).
 
 template <std::size_t Pass, std::size_t Indx>
 struct selected_f:stream_op<opSkip|opCallIs>
