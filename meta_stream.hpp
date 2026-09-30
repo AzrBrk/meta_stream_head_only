@@ -851,6 +851,11 @@ struct meta_empty_fn {
   template <class T, class...>
   using apply = T;
 };
+// Distinct from meta_empty (which is the payload of meta_empty_o, a valid empty
+// value): this tag marks a meta object that has not been constructed yet. It is
+// a pre-construction state and must never have operations (alignof, nested
+// member access, ...) applied to it.
+struct meta_uninitialized {};
 }  // namespace meta_objects_details
 
 namespace initialize_details {
@@ -878,14 +883,41 @@ template <class F, class... Arg>
 struct initialize {
   using type = typename F::template initialize<Arg...>;
 };
+
+// with_constructor: equip a meta function F with a constructor. While the host
+// object still holds the Uninit tag, its first invocation runs F::initialize
+// (the constructor); every later invocation runs F::apply. The branch is lazy
+// (if constexpr), so the apply body is never formed over the uninitialized tag
+// and cannot trigger e.g. alignof(meta_uninitialized) or missing members.
+template <class F, class Uninit = meta_objects_details::meta_uninitialized>
+struct with_constructor {
+ private:
+  template <class Obj, class... Args>
+  consteval static auto step() {
+    if constexpr (std::is_same_v<Obj, Uninit>) {
+      return std::type_identity<
+          typename F::template initialize<Obj, Args...>>{};
+    } else {
+      return std::type_identity<
+          typename F::template apply<Obj, Args...>>{};
+    }
+  }
+
+ public:
+  template <class Obj, class... Args>
+  using apply = typename decltype(step<Obj, Args...>())::type;
+};
 }  // namespace initialize_details
 
 using initialize_details::has_initializer;
 using initialize_details::initialize;
 using initialize_details::initialized;
+using initialize_details::with_constructor;
 
 /*A meta obj is a bind of a meta_function and an obj, each time it is invoked,
-it update itself to a new type, use ::type to get the inner obj*/
+it update itself to a new type, use ::type to get the inner obj. The object is a
+dumb carrier: constructor (initialize) support is added by wrapping F with
+with_constructor, not by specializing the object.*/
 template <class OBJ, class F /*Define how to Update an obj*/>
 struct meta_object {
   using type = OBJ;
@@ -896,23 +928,22 @@ struct meta_object {
   using meta_set = meta_object<ANOTHER_OBJ, F>;
 };
 
-template <class OBJ, class F>
-  requires has_initializer<F> /*with F::initialize*/
-struct meta_object<OBJ, F> {
-  using type =
-      OBJ;  // note : OBJ could still fail the Cond_Obj exam in initializer
-  template <class... Arg>
-  using apply =
-      meta_object<typename initialize<F, OBJ, Arg...>::type, initialized<F>>;
-
-  template <class ANOTHER_OBJ>
-  using meta_set = meta_object<ANOTHER_OBJ, F>;
-};
-
+// Construct a meta_object that needs no usable seed: it starts holding the
+// meta_uninitialized tag, F::initialize runs on the first invocation (the
+// constructor) and F::apply on every later one.
 template <class F>
-  requires has_initializer<F>
-using meta_object_init = meta_object<meta_objects_details::meta_empty, F>;
+using meta_object_construct =
+    meta_object<meta_objects_details::meta_uninitialized, with_constructor<F>>;
 
+// Backwards-compatible name (old meta_object_init required has_initializer<F>).
+template <class F>
+using meta_object_init = meta_object_construct<F>;
+
+// A meta_ret_object is a meta_object that also exposes ::ret (a value derived
+// from its state via Ret), which lets it act as a source/transform. Like
+// meta_object it is a dumb, single-definition carrier. Constructor support is
+// added compositionally: wrap F with with_constructor for the update, and have
+// Ret map the uninitialized tag to an idle value supplied by the upper layer.
 template <class OBJ, class F, class Ret>
 struct meta_ret_object {
   using ret = meta_invoke<Ret, OBJ>;
@@ -923,24 +954,6 @@ struct meta_ret_object {
   template <class ANOTHER_OBJ>
   using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
 };
-
-template <class OBJ, class F, class Ret>
-  requires has_initializer<F>
-struct meta_ret_object<OBJ, F, Ret> {
-  using initialized_type = typename initialize<F, OBJ>::type;
-  using ret = meta_invoke<Ret, initialized_type>;
-  using type = initialized_type;
-  template <class... Arg>
-  using apply = meta_ret_object<typename initialize<F, OBJ, Arg...>::type,
-                                initialized<F>, Ret>;
-
-  template <class ANOTHER_OBJ>
-  using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
-};
-
-template <class F, class Ret>
-  requires has_initializer<F>
-using meta_ret_init = meta_ret_object<meta_objects_details::meta_empty, F, Ret>;
 
 namespace meta_states_details {
 // low 56 bits: change history
@@ -1913,8 +1926,28 @@ struct transform_iterator_f<F> {
   using apply = meta_invoke<F, this_obj, from_ins>;
 };
 
+// Select the object: when F provides a constructor, wrap the function so
+// F::initialize runs while the object still holds the seed T (the constructor
+// receives T as this_obj, as before); otherwise a plain meta_object over T.
+template <class F, class T>
+struct transform_iterator_impl {
+ private:
+  consteval static auto make() {
+    if constexpr (meta_objects::initialize_details::has_initializer<F>) {
+      return std::type_identity<meta_object<
+          T, meta_objects::with_constructor<transform_iterator_f<F>, T>>>{};
+    } else {
+      return std::type_identity<
+          meta_object<T, transform_iterator_f<F>>>{};
+    }
+  }
+
+ public:
+  using type = typename decltype(make())::type;
+};
+
 template <class F, typename T>
-using transform_iterator = meta_object<T, transform_iterator_f<F>>;
+using transform_iterator = typename transform_iterator_impl<F, T>::type;
 }  // namespace meta_transform_iterator_detail
 
 namespace meta_self_repeat_ostream_detail {
@@ -2152,16 +2185,16 @@ struct make_base {
 
 
 // meta_states: a states type declares its starting object via ::type and provides
-// apply / on_changed / pred over that object (probed with States::type).
+// the member alias templates apply / on_changed / pred. Their mere existence is
+// probed by passing them as template-template arguments (no concrete
+// instantiation), mirroring meta_function_t, so the second parameter kind is not
+// hardcoded to std::integral_constant.
 template <class States>
 concept meta_states = requires {
   typename States::type;
-  typename States::template apply<typename States::type,
-                                  std::integral_constant<std::size_t, 0>>;
-  typename States::template on_changed<typename States::type,
-                                       std::integral_constant<std::size_t, 0>>;
-  typename States::template pred<typename States::type,
-                                 std::integral_constant<std::size_t, 0>>;
+  typename meta_function_template_container<States::template apply>;
+  typename meta_function_template_container<States::template on_changed>;
+  typename meta_function_template_container<States::template pred>;
 };
 
 // meta_states_with_opcode concept: also has opr_code
@@ -2930,7 +2963,7 @@ struct advance_f {
 /// advance to the next aligned address for the next type.
 /// </summary>
 using meta_aligned_iterator =
-    meta_object_init<meta_aligned_iterator_details::advance_f>;
+    meta_object_construct<meta_aligned_iterator_details::advance_f>;
 /// Reflection adapter: reflect a struct's non-static data members into an
 /// exp_list of their types, ready to feed meta_istream.
 /// Requires C++26 static reflection (GCC 16+, -std=c++26 -freflection).
