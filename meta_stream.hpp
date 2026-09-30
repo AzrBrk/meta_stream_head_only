@@ -3182,10 +3182,12 @@ struct break_on_change {
 };
 }  // namespace args_at_details
 
-// args_at<I>(args...): select the I-th argument by value. A compile-time index
-// stream drives the selection; non-matching indices are skipped and the flow
-// stops on the matched step, so the callable is instantiated/invoked only for
-// the one argument at position I. The selected argument is returned by value.
+// args_at<I>(args...): select the I-th argument. A compile-time index stream
+// drives the selection; non-matching indices are skipped and the flow stops on
+// the matched step, so the callable is instantiated/invoked only for the one
+// argument at position I. The callable forwards with decltype(auto), so the
+// value category is preserved: an lvalue argument yields a writable reference,
+// a prvalue yields a value.
 template <std::size_t I, class... Args>
   requires(I < sizeof...(Args))
 decltype(auto) args_at(Args&&... args) {
@@ -3193,7 +3195,9 @@ decltype(auto) args_at(Args&&... args) {
       meta_ios::meta_make_states<args_at_details::select_states<I>>,
       meta_ios::index_sequence_istream<sizeof...(Args)>,
       args_at_details::break_on_change>::for_each_forward(
-      [](auto /*stream*/, auto&& val) { return val; },
+      [](auto /*stream*/, auto&& val) -> decltype(auto) {
+        return std::forward<decltype(val)>(val);
+      },
       std::forward<Args>(args)...);
 }
 }  // namespace exp_utilities
