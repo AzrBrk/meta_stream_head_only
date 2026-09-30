@@ -3155,3 +3155,45 @@ struct meta_pipe {
 };
 
 }  // namespace meta_ios
+
+// Reopened after meta_ios: higher-level utilities built on top of meta_stream.
+namespace exp_utilities {
+namespace args_at_details {
+using meta_ios::opCallIs;
+using meta_ios::opSkip;
+using meta_ios::states_base;
+using meta_ios::stream_op;
+
+// States that change only when the incoming index equals I. Non-matching
+// indices are skipped (opSkip), and the matching step advances (opCallIs).
+template <std::size_t I>
+struct select_states : stream_op<opSkip | opCallIs>, states_base {
+  template <class this_, class from_is>
+  using pred = std::bool_constant<(I == from_is::value)>;
+};
+
+// Stop the flow as soon as the states reports a change on the last step, i.e.
+// the target index has been reached.
+struct break_on_change {
+  template <class stream>
+  struct apply {
+    static constexpr bool value = stream::to::last_changed;
+  };
+};
+}  // namespace args_at_details
+
+// args_at<I>(args...): select the I-th argument by value. A compile-time index
+// stream drives the selection; non-matching indices are skipped and the flow
+// stops on the matched step, so the callable is instantiated/invoked only for
+// the one argument at position I. The selected argument is returned by value.
+template <std::size_t I, class... Args>
+  requires(I < sizeof...(Args))
+decltype(auto) args_at(Args&&... args) {
+  return meta_ios::meta_transfer_until<
+      meta_ios::meta_make_states<args_at_details::select_states<I>>,
+      meta_ios::index_sequence_istream<sizeof...(Args)>,
+      args_at_details::break_on_change>::for_each_forward(
+      [](auto /*stream*/, auto&& val) { return val; },
+      std::forward<Args>(args)...);
+}
+}  // namespace exp_utilities
