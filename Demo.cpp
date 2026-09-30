@@ -12,9 +12,8 @@
 
 using namespace meta_ios;
 
-// Placeholder result for states whose apply step must not move the state
-// forward; the meaningful transition happens through pred / on_changed.
-struct default_t {};
+// default_t, the placeholder result for states members that leave the state
+// unset, is provided by meta_stream (and used by states_base below).
 
 // --- selected states -----------------------------------------------------
 // A meta-states class is a small state machine used as an ostream:

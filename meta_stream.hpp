@@ -2176,6 +2176,29 @@ struct operator_code {
   static constexpr std::uint64_t value = ~(Bits | ...);
 };
 
+// default_t: placeholder object / result for the states members a user states
+// class leaves unset (used by states_base below).
+struct default_t {};
+
+// states_base: supplies no-op defaults for every member a states class needs
+// (type / apply / on_changed / pred), so a user states class only overrides the
+// members it actually uses instead of writing all four every time. Combine it
+// with stream_op<Spec> through multiple inheritance when opr_code flags are
+// also needed:
+//   struct my_states : stream_op<opSkip>, states_base { ... };
+struct states_base {
+  using type = default_t;
+
+  template <class T, class U>
+  using apply = default_t;
+
+  template <class T, class U>
+  using on_changed = default_t;
+
+  template <class T, class U>
+  using pred = std::false_type;
+};
+
 // make_base<List, OpCode>: wraps a type_list with a static opr_code
 template <class List, std::uint64_t OpCode = stream_op_bits::OP_DEFAULT>
 struct make_base {
@@ -2214,23 +2237,24 @@ struct states_wrapper {
   template <class Obj, class From>
   using on_changed = typename States::template on_changed<Obj, From>;
 };
-// make_states_type: wrap a user-defined states struct into meta_states_object
+// make_states_type: wrap a user-defined states struct into meta_states_object.
+// The opcode branch is selected lazily (if constexpr) so a states without an
+// opr_code never forces a substitution of States::opr_code.
 template <meta_states States>
 struct make_states_type {
-  static constexpr bool has_opcode = requires { States::opr_code; };
-  using type = std::conditional_t<
-      has_opcode,
-      meta_states_object<
-          get_type<States>,
-          states_wrapper<States>,
+  static consteval auto get() {
+    if constexpr (requires { States::opr_code; }) {
+      return std::type_identity<meta_states_object<
+          get_type<States>, states_wrapper<States>,
+          meta_quote::binary<States::template pred>, States::opr_code>>{};
+    } else {
+      return std::type_identity<meta_states_object<
+          get_type<States>, states_wrapper<States>,
           meta_quote::binary<States::template pred>,
-          States::opr_code>,
-      meta_states_object<
-          get_type<States>,
-          states_wrapper<States>,
-          meta_quote::binary<States::template pred>,
-          stream_op<>::opr_code>
-  >;
+          stream_op<>::opr_code>>{};
+    }
+  }
+  using type = typename decltype(get())::type;
 };
 
 // convenience alias
@@ -2586,6 +2610,8 @@ using io_stream_transform_details::stream_op_bits::compose;
 using io_stream_transform_details::make_base;
 using io_stream_transform_details::operator_code;
 using io_stream_transform_details::stream_op;
+using io_stream_transform_details::default_t;
+using io_stream_transform_details::states_base;
 using io_stream_transform_details::meta_states;
 using io_stream_transform_details::meta_states_with_opcode;
 using io_stream_transform_details::states_wrapper;
@@ -3129,3 +3155,49 @@ struct meta_pipe {
 };
 
 }  // namespace meta_ios
+
+// Reopened after meta_ios: higher-level utilities built on top of meta_stream.
+namespace exp_utilities {
+namespace args_at_details {
+using meta_ios::opCallIs;
+using meta_ios::opSkip;
+using meta_ios::states_base;
+using meta_ios::stream_op;
+
+// States that change only when the incoming index equals I. Non-matching
+// indices are skipped (opSkip), and the matching step advances (opCallIs).
+template <std::size_t I>
+struct select_states : stream_op<opSkip | opCallIs>, states_base {
+  template <class this_, class from_is>
+  using pred = std::bool_constant<(I == from_is::value)>;
+};
+
+// Stop the flow as soon as the states reports a change on the last step, i.e.
+// the target index has been reached.
+struct break_on_change {
+  template <class stream>
+  struct apply {
+    static constexpr bool value = stream::to::last_changed;
+  };
+};
+}  // namespace args_at_details
+
+// args_at<I>(args...): select the I-th argument. A compile-time index stream
+// drives the selection; non-matching indices are skipped and the flow stops on
+// the matched step, so the callable is instantiated/invoked only for the one
+// argument at position I. The callable forwards with decltype(auto), so the
+// value category is preserved: an lvalue argument yields a writable reference,
+// a prvalue yields a value.
+template <std::size_t I, class... Args>
+  requires(I < sizeof...(Args))
+decltype(auto) args_at(Args&&... args) {
+  return meta_ios::meta_transfer_until<
+      meta_ios::meta_make_states<args_at_details::select_states<I>>,
+      meta_ios::index_sequence_istream<sizeof...(Args)>,
+      args_at_details::break_on_change>::for_each_forward(
+      [](auto /*stream*/, auto&& val) -> decltype(auto) {
+        return std::forward<decltype(val)>(val);
+      },
+      std::forward<Args>(args)...);
+}
+}  // namespace exp_utilities
