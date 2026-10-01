@@ -2,14 +2,17 @@
 
 一个头文件、零依赖（C++23 起）的类型流处理库。它把"遍历一组类型"这件事写成和写 STL 流相似的 API：一侧是**输入流（istream）**负责吐出类型，另一侧是**输出流（ostream）**负责接收类型，中间用 `transfer` / `meta_for` 把类型从 istream 搬到 ostream。
 
-整个库分两层：
+整个库由几个**平级的命名空间**组成：
 
-| 层 | 命名空间 | 职责 |
-|---|---|---|
-| 基础工具层 | `exp_utilities` | `exp_list`、`meta_object`、`meta_looper` 等类型级原语 |
-| 流层（本文重点） | `exp_utilities::meta_ios` | 预置的 istream / ostream、`transfer`、`meta_for`、协议、pipe |
+| 命名空间 | 职责 |
+|---|---|
+| `exp_utilities` | 基础工具：`exp_list`、上层工具 `args_at` 等 |
+| `meta_objects` | `meta_object` / `meta_ret_object` / `meta_states_object` 等元对象原语 |
+| `meta_quote` | 把普通模板/已绑定值包成元函数（`unary` / `binary` / `bind_*`） |
+| `meta_loop` | 通用编译期循环引擎 `meta_looper`（不绑定具体上层） |
+| `meta_ios`（本文重点） | 预置 istream / ostream、`transfer` / `meta_transfer_until`、协议、pipe |
 
-> 下文默认你已经 `using namespace meta_ios;`。
+> 下文默认你已经 `using namespace meta_ios;`；用到上层工具时再 `using namespace exp_utilities;`。
 
 ---
 
@@ -66,6 +69,46 @@ template<class OBJ, class F, class Ret> struct meta_ret_object {
 
 你日常不需要直接碰 `meta_looper`，只要知道它是 `transfer` 和 `meta_for` 背后的引擎即可。
 
+### 1.4 states 对象：`stream_op` / `states_base` / `meta_make_states`
+
+流中间那一步"遇到什么、要不要改、要不要停"的逻辑，库鼓励你写成一个**states 类**（而不是模板特化/偏特化）。一个完整的 states 类可以提供四个成员：
+
+| 成员 | 形状 | 作用 |
+|---|---|---|
+| `::type` | 类型 | 该状态初始持有的内部对象 |
+| `apply<this_obj, from_is>` | 别名模板 | 正常一步：返回新的内部对象 |
+| `on_changed<this_obj, from_is>` | 别名模板 | 仅当本步发生改变时使用，替代 `apply` |
+| `pred<this_obj, from_is>` | 别名模板 | 返回 bool_constant，判定本步是否命中 |
+
+每次都写全四个成员很啰嗦，库提供两个基类来省样板：
+
+- **`states_base`**：把四个成员都给成 no-op（`type=default_t`、`apply/on_changed=default_t`、`pred=false_type`）。你只需 `: states_base` 然后覆盖真正用到的成员。
+- **`stream_op<Spec...>`**：通过多重继承带上"操作码"，控制 pred 为假时的原子行为。`default_t` 是空占位类型。
+
+操作码（高字节位）短名如下，可在 `stream_op<...>` 里用 `|` 组合：
+
+| 操作码 | pred 为假时的行为 |
+|---|---|
+| `opSkip` | 跳过该元素（ostream 不变） |
+| `opCallIs` | 弹出 istream 但丢弃（让输入继续前进） |
+| `opReset` | 把 ostream 清空 |
+| `opCallOs` | 即使 pred 为假也强制调用 ostream 函数 |
+| `opBreak` | pred 为假时直接中断流 |
+
+未指定的位保持默认（`opSkip | opCallIs | opIsSkip`）。也可以用 `stream_op_bits::enable(...)` / `deactivate(...)` 显式开/关某些位。
+
+写好的 states 类用 **`meta_make_states<YourStates>`** 包成可放进流里的 `meta_states_object`：
+
+```cpp
+// 只在输入索引等于 I 时命中；其余元素跳过、输入照常前进
+template<std::size_t I>
+struct select_states : stream_op<opSkip | opCallIs>, states_base {
+    template<class this_, class from_is>
+    using pred = std::bool_constant<(I == from_is::value)>;
+};
+using states_o = meta_make_states<select_states<3>>;
+```
+
 ---
 
 ## 2. 纯元编程传输
@@ -112,27 +155,35 @@ using result = transfer_until<meta_aligned_iterator,
 
 > 警告：如果 `break_f` 永远不为真，会触发无限递归 / 模板实例化爆炸。务必保证它能在有限步内命中。
 
----
+### 2.4 `meta_transfer_until<To, From, BF, ...>`（推荐入口）
 
-## 3. 运行时桥接：`meta_for`
-
-`transfer` 系列在编译期把类型搬完，但你往往想在运行期对每一步做点事（写内存、打印、调度）。`meta_for` 就是这个桥：
+上面的 `transfer` / `meta_all_transfer` / `transfer_until` 走的是 timer 路线（固定步数或"无穷大步数"）。更直接的入口是 `meta_transfer_until`：它每一步都把当前流交给条件 `BF`，`BF` 为真就停，不预设步数。
 
 ```cpp
-template<class To, class From, class break_f = meta_always_continue>
-struct meta_for {
-    template<class F, class... Args>
-    static constexpr void for_each(F&& f, Args&&... args);
-};
+using run = meta_transfer_until<
+    meta_ostream<exp_list<>>,
+    meta_istream_list<int, char, double>,
+    /* BF，例如命中某 cache 即停 */ >;
+using result = run::type;          // 最终 meta_stream
 ```
 
-每次迭代，`f` 收到一个 `meta_stream` 对象：
+`meta_transfer_until` 同时是第 3 节运行时桥接 `for_each` / `for_each_forward` 的载体，所以纯类型计算和运行期回调可以用同一个描述。
+
+---
+
+## 3. 运行时桥接：`for_each` 与 `for_each_forward`
+
+类型在编译期走完，但你往往想在运行期对每一步做点事（写内存、打印、调度）。`meta_transfer_until<...>`（以及 timer 路线的 `meta_for<...>`）提供两个静态回调入口。
+
+### 3.1 `for_each(f)`：只回调流状态
+
+回调 `f` 每一步收到一个 `meta_stream` 对象，不转发实际参数：
 
 ```cpp
-meta_for<meta_aligned_iterator,
-         meta_istream_list<char, double, int>>::for_each(
+meta_transfer_until<meta_aligned_iterator,
+                    meta_istream_list<char, double, int>>::for_each(
     [](auto stream) {
-        std::cout << stream.value()        // 编译期常量（consteval），当前元素的位置
+        std::cout << stream.value()        // consteval，当前元素的位置
                   << " "
                   << stream.target_type(); // std::type_info，当前元素的类型
         stream.object();                   // ostream 当前状态对象（to_t{}）
@@ -149,6 +200,39 @@ meta_for<meta_aligned_iterator,
 | `.target_type()` | `typeid(to_t)` |
 | `.left()` | 剩余元素个数（`exp_size<from_t>`） |
 | `::to_t` / `::from_t` / `::cache` | 类型别名，分别是 ostream 状态 / istream 剩余 / istream 的 cache |
+
+### 3.2 `for_each_forward(f, args...)`：按位置转发真实参数，并可返回值
+
+`for_each` 只给流状态；`for_each_forward` 额外把一组**真实运行期参数**按位置对应到每一步：第 k 步的回调收到 `(stream, args[k])`。被跳过的步骤其参数直接丢弃，命中步骤的回调才拿到对应值。整个函数是 `decltype(auto)`：当流在某个命中步骤之后停止时，返回该步回调的返回值，值类别原样透传。
+
+```cpp
+decltype(auto) result = meta_transfer_until<States, Istream, BF>::for_each_forward(
+    [](auto /*stream*/, auto&& val) -> decltype(auto) {
+        return std::forward<decltype(val)>(val);   // 命中值，完美转发
+    },
+    std::forward<Args>(args)...);
+```
+
+回调只在命中那一步实例化/调用，因此即使包很大，也只为目标参数生成一次。
+
+### 3.3 `exp_utilities::args_at<I>(args...)`：按位置取参数
+
+`for_each_forward` 最直接的上层封装就是 `args_at<I>`：编译期选出第 I 个参数并完美转发，语义对齐 `std::get`。
+
+```cpp
+template<std::size_t I, class... Args>
+    requires(I < sizeof...(Args))          // 越界下标在调用点直接被约束拦截
+decltype(auto) args_at(Args&&... args);
+```
+
+- 左实参 → 可写的左值引用；右实参 → 右值引用（`T&&`）。
+- 下标非法（`I >= sizeof...(Args)`）时，因 `requires` 不满足而**在调用点直接报错**，不需要进入函数体判断。
+
+```cpp
+int a = 1; std::string s = "x";
+args_at<0>(a, s) = 42;            // 通过返回的左值引用写入
+auto&& v = args_at<2>(1, 2, 3);   // v 绑定到第 3 个参数
+```
 
 ---
 
@@ -180,7 +264,18 @@ using is = meta_index_istream<0>;
 
 适合配合 ostream 做"按编号生成"。
 
-### 4.3 `meta_count<start, count>` / `meta_count_istream<start, count>`
+### 4.3 `index_sequence_istream<N>`
+
+`meta_index_istream` 永不结束；`index_sequence_istream<N>` 则**有界**：依次吐出 `0, 1, ..., N-1`，然后自然结束。它的 cache 被归一化成标准的 `std::integral_constant<std::size_t, k>`，因此可以直接用 `is_same<cache, integral_constant<std::size_t, K>>` 这类条件精确定位。
+
+```cpp
+using is = index_sequence_istream<4>;
+// is::ret 对应 0；apply 三次后依次 1,2,3；再下一步结束
+```
+
+`args_at` 内部就是用它驱动选择。
+
+### 4.4 `meta_count<start, count>` / `meta_count_istream<start, count>`
 
 从 `start` 起、数 `count` 个就停：
 
@@ -189,7 +284,7 @@ using is = meta_count_istream<10, 3>;
 // 依次给 Idx<10>, Idx<11>, Idx<12>，然后结束
 ```
 
-### 4.4 `meta_repeat_istream<T>`
+### 4.5 `meta_repeat_istream<T>`
 
 **永不结束**，每次都吐出同一个 `T`：
 
@@ -198,11 +293,11 @@ using is = meta_repeat_istream<int>;
 // 每次 ::ret == int
 ```
 
-### 4.5 `meta_char_istream<static_str>`
+### 4.6 `meta_char_istream<static_str>`
 
 把一个编译期字符串逐字符读出，`'0'` 终止。`static_str` 是库提供的编译期字符串字面量包装。
 
-### 4.6 `meta_transform_istream<TL, F>`
+### 4.7 `meta_transform_istream<TL, F>`
 
 读元素时先过一道 `F` 变换再吐出来：
 
