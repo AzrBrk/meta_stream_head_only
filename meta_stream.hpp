@@ -1079,7 +1079,12 @@ consteval bool changed_value() {
 }
 }  // namespace meta_states_details
 
-struct observe_stream {
+// observe_default: the default, generic observer for the looper. It is a
+// unary meta-function that reports whether a stage changed by reading the
+// states object's own change bit (changed_value). It is the looper's runtime
+// callback gate; it is distinct from the states change predicate a user picks
+// (ostream/istream/cache/stream_observer).
+struct observe_default {
   template <class Stage>
   using apply = std::bool_constant<meta_states_details::changed_value<Stage>()>;
 };
@@ -1242,7 +1247,7 @@ using namespace meta_objects;
 // Note: All template parameters are meta objects
 namespace meta_looper_detail {
 template <bool, class Condition, class OBJ, class Generator = meta_empty_o,
-          class Observer = observe_stream>
+          class Observer = observe_default>
 struct meta_looper_impl {
   template <class... Args>
   struct apply {
@@ -1450,14 +1455,14 @@ struct meta_looper_impl<false, Cond, MO, Generator, Observer> {
 };
 }  // namespace meta_looper_detail
 
-template <class C, class O, class G, class Observer = observe_stream,
+template <class C, class O, class G, class Observer = observe_default,
           class... ARG_Tys>
 using meta_looper_t = typename meta_invoke<
     meta_looper_detail::meta_looper_impl<true, C, O, G, Observer>,
     ARG_Tys...>::type;
 
 template <class C, class O, class G = meta_empty_o,
-          class Observer = observe_stream>
+          class Observer = observe_default>
 using meta_looper =
     meta_looper_detail::meta_looper_impl<true, C, O, G, Observer>;
 }  // namespace meta_loop
@@ -2543,28 +2548,38 @@ concept meta_ostream_t =
 
 using meta_range_continue = io_stream_transform_details::meta_always_false_c_o;
 
-template <meta_ostream_t To, meta_istream_t From, class BF,
-          class Observer = observe_stream,
-          class ChangedPred =
-              io_stream_transform_details::default_stream_change_pred>
+//=== user-selectable states observers (change predicates) ===
+// Each observer is a binary meta-function (observe_*_change) bound to the
+// stream update function meta_stream_s_f. It decides what counts as a "change"
+// at each step, which drives the states flags / last_changed and, through the
+// looper's default observer (observe_default), whether the runtime callback
+// fires. ostream_observer is the default.
+using ostream_observer =
+    observe_os_change<io_stream_transform_details::meta_stream_s_f>;
+using istream_observer =
+    observe_is_change<io_stream_transform_details::meta_stream_s_f>;
+using cache_observer =
+    observe_cache_change<io_stream_transform_details::meta_stream_s_f>;
+using stream_observer =
+    observe_whole_change<io_stream_transform_details::meta_stream_s_f>;
+
+template <meta_ostream_t To, meta_istream_t From, class BF, class Observer>
 using meta_transfer_until_impl = meta_invoke<meta_looper<
     io_stream_transform_details::meta_transfer_until_condition_o<BF>,
-    io_stream_transform_details::meta_stream_s_o<To, From, ChangedPred>,
-    meta_empty_o, Observer>>;
+    io_stream_transform_details::meta_stream_s_o<To, From, Observer>,
+    meta_empty_o, observe_default>>;
 
 template <meta_ostream_t To, meta_istream_t From,
-          class BF = meta_range_continue, class Observer = observe_stream,
-          class ChangedPred =
-              io_stream_transform_details::default_stream_change_pred>
+          class BF = meta_range_continue,
+          class Observer = ostream_observer>
 using meta_transfer_until =
-    meta_transfer_until_impl<To, From, BF, Observer, ChangedPred>;
+    meta_transfer_until_impl<To, From, BF, Observer>;
 
 template <meta_ostream_t To, meta_istream_t From,
-          class break_f = meta_range_continue, class Observer = observe_stream,
-          class ChangedPred =
-              io_stream_transform_details::default_stream_change_pred>
-using transfer_until = typename meta_transfer_until<To, From, break_f, Observer,
-                                                    ChangedPred>::type;
+          class break_f = meta_range_continue,
+          class Observer = ostream_observer>
+using transfer_until =
+    typename meta_transfer_until<To, From, break_f, Observer>::type;
 
 // convert meta_stream into a timed meta_object
 template <std::size_t Transfer_Length, meta_ostream_t To, meta_istream_t From,

@@ -27,12 +27,8 @@ using namespace meta_ios;
 // opSkip|opCallIs: while pred is false every non-matching input is skipped and
 // the istream advances, so at runtime only the matching branch survives.
 template <std::size_t Pass, std::size_t Indx>
-struct selected : stream_op<opSkip | opCallIs> {
+struct selected : stream_op<opSkip | opCallIs>, states_base {
   using type = Idx<0>;
-
-  // not changed: leave the state where it is
-  template <class this_idx, class from_ins>
-  using apply = default_t;
 
   // changed only when the incoming index is the one we are looking for
   template <class this_idx, class from_ins>
@@ -63,11 +59,8 @@ using selected_states = meta_make_states<selected<P, I>>;
 // pred stays true while the sought index still lies beyond this tuple's size,
 // and on_changed subtracts that size to move on to the next tuple.
 template <std::size_t I>
-struct dec_size : stream_op<opBreak> {
+struct dec_size : stream_op<opBreak>, states_base {
   using type = Idx<I>;
-
-  template <class this_idx, class from_ins>
-  using apply = default_t;
 
   // true while the sought index is past the end of the current tuple
   template <class this_idx, class from_ins>
@@ -111,7 +104,7 @@ decltype(auto) from_tuples_v(Tp&&... tps) {
       selected_states<passed_count, index>,
       index_sequence_istream<sizeof...(Tp)>,
       break_on_change>::for_each_forward(
-      [](auto index_stream, auto&& tp) {
+      [](auto index_stream, auto&& tp)->decltype(auto) {
         return std::get<index_stream.value()>(tp);
       },
       std::forward<Tp>(tps)...);
@@ -129,6 +122,16 @@ decltype(auto) from_tuples_v(Tp&&... tps) {
 int main() {
   std::tuple t{1, 3.33, std::string("test")};
   std::tuple t1{std::string("my_str"), 5.74};
+
+  int a =10, b = 20;
+
+  static_assert(std::is_same_v<decltype(args_at<1>(a, b, 18)), int&>);
+  static_assert(std::is_same_v<decltype(args_at<2>(a, b, 18)), int&&>);
+
+  meta_for<meta_iterator, index_sequence_istream<5>>::for_each([&t, &t1](auto stream) {
+    std::cout << from_tuples_v<stream.value()>(t, t1)
+              << (stream.left() ? ',' : '\n');
+  });
 
   // With no protocol, the callable receives the whole meta-stream stage. For
   // every global index 0..4, from_tuples_v selects the value from the tuple
