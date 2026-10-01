@@ -2037,6 +2037,19 @@ struct is_meta_object<
 template <class T>
 constexpr bool is_meta_object_v = is_meta_object<T>::value;
 
+// Detect a meta_states_object specifically (as opposed to a plain
+// meta_object / meta_ret_object), so meta_stream can expose the states
+// introspection members only when its ostream carries states.
+template <class T>
+struct is_meta_states_object : std::false_type {};
+template <class OBJ, class F, class Changed_Pred, std::uint64_t byte_flag,
+          std::size_t flag_index>
+struct is_meta_states_object<
+    meta_states_object<OBJ, F, Changed_Pred, byte_flag, flag_index>>
+    : std::true_type {};
+template <class T>
+constexpr bool is_meta_states_object_v = is_meta_states_object<T>::value;
+
 template <class T>
 struct is_meta_object_ret : std::false_type {};
 
@@ -2110,6 +2123,23 @@ struct meta_stream {
     }
   }
   consteval std::size_t left() const { return exp_size<from_t>; }
+
+  // States introspection: available only when the ostream (To) is a
+  // meta_states_object. Expose the states flag index (To::size, i.e. the
+  // number of recorded steps), the raw flags word, and the last-step change
+  // bit. For a non-states To these members are not declared at all.
+  consteval std::size_t index() const
+    requires io_stream_traits::is_meta_states_object_v<To> {
+    return To::size;
+  }
+  consteval std::uint64_t flags() const
+    requires io_stream_traits::is_meta_states_object_v<To> {
+    return To::flags;
+  }
+  consteval bool last_changed() const
+    requires io_stream_traits::is_meta_states_object_v<To> {
+    return To::last_changed;
+  }
 };
 template <class meta_stream_t>
 struct meta_stream_update {
