@@ -2125,12 +2125,13 @@ struct meta_stream {
   consteval std::size_t left() const { return exp_size<from_t>; }
 
   // States introspection: available only when the ostream (To) is a
-  // meta_states_object. Expose the states flag index (To::size, i.e. the
-  // number of recorded steps), the raw flags word, and the last-step change
-  // bit. For a non-states To these members are not declared at all.
+  // meta_states_object. Expose the states flag index (To::size is the 1-based
+  // count of recorded steps, so the current 0-based index is size - 1), the
+  // raw flags word, and the last-step change bit. For a non-states To these
+  // members are not declared at all.
   consteval std::size_t index() const
     requires io_stream_traits::is_meta_states_object_v<To> {
-    return To::size;
+    return To::size - 1;
   }
   consteval std::uint64_t flags() const
     requires io_stream_traits::is_meta_states_object_v<To> {
