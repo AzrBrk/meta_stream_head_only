@@ -1879,8 +1879,6 @@ struct index_counter : std::integral_constant<std::size_t, dec_index>,
                        end_of_stream<(dec_index == 0)> {
   static constexpr std::size_t length = dec_index;
   using dec_t = index_counter<dec_index - 1>;
-  template <std::size_t Len>
-  using ret_t = index_counter<Len - dec_index>;
 };
 
 template <std::size_t Len>
@@ -1891,8 +1889,13 @@ struct dec_index_f {
 
 template <std::size_t Len>
 struct ret_index {
+  // The produced position is exposed as a plain std::integral_constant (not as
+  // the state type index_counter itself), so exact-type conditions such as
+  // std::is_same<cache, std::integral_constant<std::size_t, K>> match. The
+  // loop state remains index_counter; only the returned cache is normalized.
   template <class this_index, class...>
-  using apply = typename this_index::template ret_t<Len>;
+  using apply =
+      std::integral_constant<std::size_t, Len - this_index::value>;
 };
 
 template <std::size_t Len>
@@ -2319,12 +2322,20 @@ struct meta_stream_s_f {
     static constexpr bool op_is_idle =
         (code & stream_op_bits::OP_IS_IDLE);
 
-    // record one step: flag_index++, Changed controls the new low bit
+    // record one step. Use the same overflow protocol as meta_states_object:
+    // next_flags() resets the low 56 bits once the index reaches 56, and the
+    // index wraps to 0, so a long stream never forms (1ULL << index) for an
+    // index >= 64 (which would be ill-formed).
+    template <bool Changed>
+    static consteval std::uint64_t recorded_flags() {
+      return meta_states_details::next_flags<Changed, To::flags, To::size>();
+    }
     template <bool Changed>
     using record = meta_states_object<
         typename To::type, typename To::function,
         typename To::changed_pred,
-        To::flags | (Changed ? (1ULL << To::size) : 0), To::size + 1>;
+        recorded_flags<Changed>(),
+        (To::size >= 56 ? 0 : To::size + 1)>;
 
     // choose_from<Advance>: advance the input or keep it
     template <bool Advance, class FromT>
@@ -3171,33 +3182,28 @@ struct select_states : stream_op<opSkip | opCallIs>, states_base {
   template <class this_, class from_is>
   using pred = std::bool_constant<(I == from_is::value)>;
 };
-
-// Stop the flow as soon as the states reports a change on the last step, i.e.
-// the target index has been reached.
-struct break_on_change {
-  template <class stream>
-  struct apply {
-    static constexpr bool value = stream::to::last_changed;
-  };
-};
 }  // namespace args_at_details
 
 // args_at<I>(args...): select the I-th argument. A compile-time index stream
-// drives the selection; non-matching indices are skipped and the flow stops on
-// the matched step, so the callable is instantiated/invoked only for the one
-// argument at position I. The callable forwards with decltype(auto), so the
-// value category is preserved: an lvalue argument yields a writable reference,
-// a prvalue yields a value.
+// drives the selection; the flow stops as soon as the stream cache reaches the
+// slot following I, so the callable is instantiated/invoked only for the one
+// argument at position I (and, unlike a change-history test, this works for an
+// arbitrary pack size). The callable forwards with decltype(auto), preserving
+// the value category: an lvalue yields a writable reference, an rvalue yields
+// an rvalue reference.
 template <std::size_t I, class... Args>
   requires(I < sizeof...(Args))
 decltype(auto) args_at(Args&&... args) {
   return meta_ios::meta_transfer_until<
       meta_ios::meta_make_states<args_at_details::select_states<I>>,
       meta_ios::index_sequence_istream<sizeof...(Args)>,
-      args_at_details::break_on_change>::for_each_forward(
-      [](auto /*stream*/, auto&& val) -> decltype(auto) {
-        return std::forward<decltype(val)>(val);
-      },
-      std::forward<Args>(args)...);
+      meta_ios::protocols::only_stream_cache_unref<
+          meta_quote::bind_binary<
+              std::is_same, std::integral_constant<std::size_t, I + 1>>>>::
+      for_each_forward(
+          [](auto /*stream*/, auto&& val) -> decltype(auto) {
+            return std::forward<decltype(val)>(val);
+          },
+          std::forward<Args>(args)...);
 }
 }  // namespace exp_utilities
