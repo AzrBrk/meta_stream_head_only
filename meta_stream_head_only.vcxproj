@@ -139,11 +139,16 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="meta_utilities.hpp" />
+    <ClInclude Include="meta_invoke_protocols.hpp" />
+    <ClInclude Include="meta_objects.hpp" />
+    <ClInclude Include="meta_ios.hpp" />
     <ClInclude Include="meta_stream.hpp" />
     <ClInclude Include="type_safe_aligned_iterator.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="test_looper_header.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

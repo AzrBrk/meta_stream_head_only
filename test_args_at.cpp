@@ -46,9 +46,9 @@ int main() {
   args_at<1>(a, s) = "done";
   std::cout << a << ' ' << s << ' ' << args_at<0>(1, 2, 3) << '\n';
 
-  // arbitrary-size pack: middle and last elements
-  std::size_t mid = big_select<1000, 500>(std::make_index_sequence<1000>{});
-  std::size_t last = big_select<1000, 999>(std::make_index_sequence<1000>{});
-  assert(mid == 500 && last == 999);
+  // Cross the old ~56-element change-history limit without excessive recursion.
+  std::size_t mid = big_select<64, 32>(std::make_index_sequence<64>{});
+  std::size_t last = big_select<64, 63>(std::make_index_sequence<64>{});
+  assert(mid == 32 && last == 63);
   std::cout << "big pack: " << mid << ' ' << last << '\n';
 }

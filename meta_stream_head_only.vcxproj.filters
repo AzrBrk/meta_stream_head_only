@@ -15,6 +15,18 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="meta_utilities.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="meta_invoke_protocols.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="meta_objects.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="meta_ios.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="meta_stream.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -24,6 +36,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="test_looper_header.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
