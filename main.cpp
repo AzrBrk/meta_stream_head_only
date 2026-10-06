@@ -35,7 +35,7 @@ struct states_function_wrapper{
 
 template<class F, class OBJ, class change_pred, std::uint64_t flags, class Else>
 struct to_states_impl<meta_object<OBJ, F>, change_pred, flags, Else>{
-  using type = meta_states_object<OBJ, states_function_wrapper<F, Else>, change_pred, 0>;
+  using type = meta_states_object<OBJ, states_function_wrapper<F, Else>, change_pred, flags>;
 };
 
 template<class Mo, class change_pred, std::uint64_t flags, class Else = typename meta_objects::meta_empty_o::function>
@@ -47,35 +47,61 @@ struct is_type{
   using apply = std::is_same<T, U>;
 };
 
+template<class TL>
+void print_list(TL = {}){
+  if constexpr(exp_size<TL> == 0){
+    std::cout << "empty: " << typeid(TL).name() << std::endl;
+  }
+  else{
+    meta_for<meta_iterator, meta_istream<TL>>::
+    for_each(
+      [](auto stream){
+        std::cout << stream.target_type().name() << (stream.left()? ',':'\n');
+      }
+    );
+  }
+}
+
+struct else_clear{
+  template<class this_list, class from_is>
+  using apply = exp_list<>;
+};
+
 int main(){
-  using states_iter = to_states<meta_iterator, protocols::only_arg<is_type<int>>, (opSkip|opCallIs)>;
-  using states_iter_callos_on = to_states<meta_iterator, protocols::only_arg<is_type<int>>, (opSkip|opCallIs|opCallOs)>;
-  using states_iter_deactive_skip = to_states<meta_iterator, protocols::only_arg<is_type<int>>, (compose(deactivate(opSkip))|opCallIs|opCallOs)>;
-  meta_ios::meta_transfer_until<states_iter, meta_istream_list<int, double, char, int, int>>
+  using states_iter = to_states<
+      meta_ostream<>, protocols::only_arg<is_type<int>>,
+          (opSkip|opCallIs), else_clear>;
+  using states_iter_callos_on = to_states<
+      meta_ostream<>, protocols::only_arg<is_type<int>>,
+          (opSkip|opCallIs|opCallOs), else_clear>;
+  using states_iter_deactive_skip = to_states<
+      meta_ostream<>, protocols::only_arg<is_type<int>>,
+          compose(deactivate(opSkip))>;
+  meta_ios::meta_transfer_until<states_iter, meta_istream_list<char, int, double, char, int, int>>
   ::for_each(
     [](auto stream){
-      std::cout << stream.index() << ": " 
-        << stream.target_type().name() << ":"
-        << std::bitset<sizeof(std::uint64_t) * 8>(stream.flags())
-        << std::endl;
+      std::cout << stream.index() << ": " ;
+      print_list(stream.object());
+      std::cout<< ": " << std::bitset<sizeof(std::uint64_t) * 8>(stream.flags())
+               << std::endl;
     }
   );
-  meta_ios::meta_transfer_until<states_iter_callos_on, meta_istream_list<int, double, char, int, int>>
+  meta_ios::meta_transfer_until<states_iter_callos_on, meta_istream_list<char, int, double, char, int, int>>
   ::for_each(
     [](auto stream){
-      std::cout << stream.index() << ": " 
-        << stream.target_type().name() << ":"
-        << std::bitset<sizeof(std::uint64_t) * 8>(stream.flags())
-        << std::endl;
+      std::cout << stream.index() << ": " ;
+      print_list(stream.object());
+      std::cout<< ": " << std::bitset<sizeof(std::uint64_t) * 8>(stream.flags())
+               << std::endl;
     }
   );
-  meta_ios::meta_transfer_until<states_iter_deactive_skip, meta_istream_list<int, double, char, int, int>>
+  meta_ios::meta_transfer_until<states_iter_deactive_skip, meta_istream_list<char, int, double, char, int, int>>
   ::for_each(
     [](auto stream){
-      std::cout << stream.index() << ": " 
-        << stream.target_type().name() << ":"
-        << std::bitset<sizeof(std::uint64_t) * 8>(stream.flags())
-        << std::endl;
+      std::cout << stream.index() << ": " ;
+      print_list(stream.object());
+      std::cout<< ": " << std::bitset<sizeof(std::uint64_t) * 8>(stream.flags())
+               << std::endl;
     }
   );
 }
