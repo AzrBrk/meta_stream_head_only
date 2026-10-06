@@ -920,6 +920,7 @@ dumb carrier: constructor (initialize) support is added by wrapping F with
 with_constructor, not by specializing the object.*/
 template <class OBJ, class F /*Define how to Update an obj*/>
 struct meta_object {
+  using function = F;
   using type = OBJ;
   template <class... Arg>
   using apply = meta_object<meta_invoke<F, OBJ, Arg...>, F>;
@@ -946,6 +947,7 @@ using meta_object_init = meta_object_construct<F>;
 // Ret map the uninitialized tag to an idle value supplied by the upper layer.
 template <class OBJ, class F, class Ret>
 struct meta_ret_object {
+  using function = F;
   using ret = meta_invoke<Ret, OBJ>;
   using type = OBJ;
   template <class... Arg>
@@ -2393,12 +2395,12 @@ struct meta_stream_s_f {
     template <class ToT, class FromT, class RecordedT, class CacheT>
     struct choose_ostream<true, true, ToT, FromT, RecordedT, CacheT> {
       // call_os takes priority
-      using type = typename ToT::template meta_set<
+      using type = typename RecordedT::template meta_set<
           meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
     };
     template <class ToT, class FromT, class RecordedT, class CacheT>
     struct choose_ostream<true, false, ToT, FromT, RecordedT, CacheT> {
-      using type = typename ToT::template meta_set<
+      using type = typename RecordedT::template meta_set<
           meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
     };
     template <class ToT, class FromT, class RecordedT, class CacheT>
