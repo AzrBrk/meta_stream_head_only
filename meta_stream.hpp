@@ -920,6 +920,7 @@ dumb carrier: constructor (initialize) support is added by wrapping F with
 with_constructor, not by specializing the object.*/
 template <class OBJ, class F /*Define how to Update an obj*/>
 struct meta_object {
+  using function = F;
   using type = OBJ;
   template <class... Arg>
   using apply = meta_object<meta_invoke<F, OBJ, Arg...>, F>;
@@ -946,6 +947,7 @@ using meta_object_init = meta_object_construct<F>;
 // Ret map the uninitialized tag to an idle value supplied by the upper layer.
 template <class OBJ, class F, class Ret>
 struct meta_ret_object {
+  using function = F;
   using ret = meta_invoke<Ret, OBJ>;
   using type = OBJ;
   template <class... Arg>
@@ -1534,32 +1536,19 @@ struct observe_istream {
       std::bool_constant<stream_observe_details::input_changed<Stage>()>;
 };
 
-//=== ChangedPred predicates for meta_stream_s_o ===
-// If to is itself a meta_states_object, read its state directly — no
-// preview/compare. Otherwise preview F and compare current vs next.
-namespace observe_details {
-template <class To, class Cache, class = void>
-struct to_changed : std::false_type {};
-
-template <class To, class Cache>
-struct to_changed<To, Cache, std::void_t<typename To::changed_pred>> {
-  static constexpr bool value = To::template changed<Cache>::value;
-};
-}  // namespace observe_details
-
 template <class F>
 struct observe_os_change {
   template <class ThisObj, class FromIs>
   struct apply {
     using cache_t = typename ThisObj::cache;
     static constexpr bool value = [] {
-      // When the cache is a skip_signal and the ostream consumes it, the update
-      // leaves the ostream unchanged, so the preview below compares equal and
-      // this naturally reports "no change" -- no skip-specific special case.
-      if constexpr (observe_details::to_changed<typename ThisObj::to,
-                                                cache_t>::value)
-        return true;
-      else {
+      if constexpr (requires { typename ThisObj::to::changed_pred; }) {
+        constexpr std::uint64_t op_skip = std::uint64_t{1} << 56;
+        if constexpr ((ThisObj::to::flags & op_skip) == 0)
+          return true;
+        else
+          return ThisObj::to::template changed<cache_t>::value;
+      } else {
         using next_t =
             typename stream_observe_details::preview_next<F, ThisObj,
                                                           FromIs>::type;
@@ -2393,12 +2382,12 @@ struct meta_stream_s_f {
     template <class ToT, class FromT, class RecordedT, class CacheT>
     struct choose_ostream<true, true, ToT, FromT, RecordedT, CacheT> {
       // call_os takes priority
-      using type = typename ToT::template meta_set<
+      using type = typename RecordedT::template meta_set<
           meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
     };
     template <class ToT, class FromT, class RecordedT, class CacheT>
     struct choose_ostream<true, false, ToT, FromT, RecordedT, CacheT> {
-      using type = typename ToT::template meta_set<
+      using type = typename RecordedT::template meta_set<
           meta_invoke<typename ToT::function, typename ToT::type, CacheT>>;
     };
     template <class ToT, class FromT, class RecordedT, class CacheT>
@@ -2576,10 +2565,9 @@ using meta_transfer_until =
     meta_transfer_until_impl<To, From, BF, Observer>;
 
 template <meta_ostream_t To, meta_istream_t From,
-          class break_f = meta_range_continue,
-          class Observer = ostream_observer>
+      class break_f = meta_range_continue>
 using transfer_until =
-    typename meta_transfer_until<To, From, break_f, Observer>::type;
+    typename meta_transfer_until<To, From, break_f>::type;
 
 // convert meta_stream into a timed meta_object
 template <std::size_t Transfer_Length, meta_ostream_t To, meta_istream_t From,

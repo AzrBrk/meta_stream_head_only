@@ -123,51 +123,10 @@ int main() {
   std::tuple t{1, 3.33, std::string("test")};
   std::tuple t1{std::string("my_str"), 5.74};
 
-  int a =10, b = 20;
-
-  static_assert(std::is_same_v<decltype(args_at<1>(a, b, 18)), int&>);
-  static_assert(std::is_same_v<decltype(args_at<2>(a, b, 18)), int&&>);
-
   meta_for<meta_iterator, index_sequence_istream<5>>::for_each([&t, &t1](auto stream) {
     std::cout << from_tuples_v<stream.value()>(t, t1)
               << (stream.left() ? ',' : '\n');
   });
 
-  // With no protocol, the callable receives the whole meta-stream stage. For
-  // every global index 0..4, from_tuples_v selects the value from the tuple
-  // that contains it and prints it, comma-separated.
-  meta_pipe<index_sequence_istream<5>>::run<meta_iterator>::for_each(
-      [&t, &t1](auto stream) {
-        std::cout << from_tuples_v<stream.value()>(t, t1)
-                  << (stream.left() ? ',' : '\n');
-      });
-
-  // NOTE: the aligned-iterator part below is a demonstration, not a general
-  // guarantee: meta_aligned_iterator does not promise its layout fits every
-  // C++ struct. Its purpose is to show how data can be managed inside a
-  // heterogeneic vector -- use it as a navigator when building your own.
-  struct S {
-    int a;
-    double b;
-    std::string s;
-  };
-
-  std::cout << std::endl;
-  S s{10, 3.13, std::string{"helloS"}};
-
-  // Build a reversed ostream of aligned iterators over the member types
-  // int, double, std::string. protocols::wait_for_end_to_t waits until the
-  // istream is exhausted: a list inserted in reverse only yields the correct,
-  // fully assembled type at the end. The wait idles the visit until it then
-  // releases the stream and extracts its ostream, so the callable runs exactly
-  // once. Visiting via protocols::stream_to_t hands it the aligned-iterator
-  // list, and each iterator reads its member directly out of &s.
-  meta_pipe<meta_istream_list<int, double, std::string>>::all_to<
-      meta_aligned_iterator>::all_to<meta_rostream<>,
-                                     protocols::wait_for_end_to_t>::run<
-      meta_iterator>::for_each<protocols::stream_to_t>(
-      [&s]<class... PTR>(exp_list<PTR...>) {
-        ((std::cout << PTR{}.get(reinterpret_cast<std::byte*>(&s)) << ' '),
-         ...);
-      });
+  
 }
