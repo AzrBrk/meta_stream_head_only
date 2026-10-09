@@ -439,45 +439,27 @@ using replace_able_ostream =
     meta_object<no_exist_type, meta_quote::binary<replace_this>>;
 }  // namespace meta_replace_able_ostream_detail
 namespace meta_transform_iterator_detail {
+
 using exp_utilities::literal_types::no_exist_type;
 template <class F>
 struct transform_iterator_f {
+  
+
   template <class this_obj, class from_ins>
   using apply = meta_invoke<F, this_obj, from_ins>;
+
+  template<class from_ins>
+  using initialize = initialize<F, from_ins>;
 };
 
-template <class F>
-  requires(meta_objects::initialize_details::has_initializer<F>)
-struct transform_iterator_f<F> {
-  template <class this_obj, class from_ins>
-  using initialize =
-      meta_objects::initialize_details::initialize<F, this_obj, from_ins>;
-  template <class this_obj, class from_ins>
-  using apply = meta_invoke<F, this_obj, from_ins>;
-};
+template<bool con, meta_object_t mo, class T>
+using set_if = std::conditional_t<con, typename mo::meta_set<T>, mo>;
 
-// Select the object: when F provides a constructor, wrap the function so
-// F::initialize runs while the object still holds the seed T (the constructor
-// receives T as this_obj, as before); otherwise a plain meta_object over T.
-template <class F, class T>
-struct transform_iterator_impl {
- private:
-  consteval static auto make() {
-    if constexpr (meta_objects::initialize_details::has_initializer<F>) {
-      return std::type_identity<meta_object<
-          T, meta_objects::with_constructor<transform_iterator_f<F>, T>>>{};
-    } else {
-      return std::type_identity<
-          meta_object<T, transform_iterator_f<F>>>{};
-    }
-  }
-
- public:
-  using type = typename decltype(make())::type;
-};
 
 template <class F, typename T>
-using transform_iterator = typename transform_iterator_impl<F, T>::type;
+using transform_iterator = set_if<
+                            !std::is_same_v<no_exist_type, T>, 
+                            meta_object<transform_iterator_f<F>>, T>;
 }  // namespace meta_transform_iterator_detail
 
 namespace meta_self_repeat_ostream_detail {
@@ -532,9 +514,19 @@ struct timer_receiver {
   template <class timer, class...>
   struct apply : timer {};
 };
-}  // namespace timer_condition_details
+};
+
+namespace states_condition_details {
+struct states_break_cond {
+  template <class flags_t>
+  struct apply : std::bool_constant<(flags_t::value & (1ULL << 63)) != 0> {};
+};
+}  // namespace states_condition_details
+
 using meta_timer_cond_o =
     meta_object<void, timer_condition_details::timer_receiver>;
+using meta_states_cond_o =
+    meta_object<void, states_condition_details::states_break_cond>;
 }  // namespace io_stream_transform_details
 using meta_loop::meta_looper;
 using meta_loop::meta_looper_t;
@@ -555,10 +547,10 @@ template <class OBJ, class F>
 struct is_meta_object<meta_object<OBJ, F>> : std::true_type {};
 template <class OBJ, class F, class Ret>
 struct is_meta_object<meta_ret_object<OBJ, F, Ret>> : std::true_type {};
-template <class OBJ, class F, class Changed_Pred, std::uint64_t byte_flag,
-          std::size_t flag_index>
+template <class OBJ, class F, class Changed_Pred, class break_f,
+          std::uint64_t byte_flag, std::size_t flag_index>
 struct is_meta_object<
-    meta_states_object<OBJ, F, Changed_Pred, byte_flag, flag_index>>
+    meta_states_object<OBJ, F, Changed_Pred, break_f, byte_flag, flag_index>>
     : std::true_type {};
 
 template <class T>
@@ -569,29 +561,22 @@ constexpr bool is_meta_object_v = is_meta_object<T>::value;
 // introspection members only when its ostream carries states.
 template <class T>
 struct is_meta_states_object : std::false_type {};
-template <class OBJ, class F, class Changed_Pred, std::uint64_t byte_flag,
-          std::size_t flag_index>
+template <class OBJ, class F, class Changed_Pred, class break_f,
+          std::uint64_t byte_flag, std::size_t flag_index>
 struct is_meta_states_object<
-    meta_states_object<OBJ, F, Changed_Pred, byte_flag, flag_index>>
+    meta_states_object<OBJ, F, Changed_Pred, break_f, byte_flag, flag_index>>
     : std::true_type {};
 template <class T>
 constexpr bool is_meta_states_object_v = is_meta_states_object<T>::value;
 
-template <class T>
-struct is_meta_object_ret : std::false_type {};
-
-template <class OBJ, class F, class Ret>
-struct is_meta_object_ret<meta_ret_object<OBJ, F, Ret>> : std::true_type {};
-template <class T>
-constexpr bool is_meta_object_ret_v = is_meta_object_ret<T>::value;
 
 // the meta_istream_type must be a meta_ret_object
 template <class T>
-concept meta_istream_t = is_meta_object_ret_v<T>;
+concept meta_istream_t = meta_ret_object_t<T>;
 
 // the meta_ostream_type can be any type of meta_object
 template <class T>
-concept meta_ostream_t = is_meta_object_v<T>;
+concept meta_ostream_t = meta_object_t<T>;
 
 }  // namespace io_stream_traits
 
@@ -807,11 +792,13 @@ struct make_states_type {
     if constexpr (requires { States::opr_code; }) {
       return std::type_identity<meta_states_object<
           get_type<States>, states_wrapper<States>,
-          meta_quote::binary<States::template pred>, States::opr_code>>{};
+          meta_quote::binary<States::template pred>,
+          meta_states_details::meta_states_always_continue, States::opr_code>>{};
     } else {
       return std::type_identity<meta_states_object<
           get_type<States>, states_wrapper<States>,
           meta_quote::binary<States::template pred>,
+          meta_states_details::meta_states_always_continue,
           stream_op<>::opr_code>>{};
     }
   }
@@ -891,7 +878,7 @@ struct meta_stream_s_f {
     template <bool Changed>
     using record = meta_states_object<
         typename To::type, typename To::function,
-        typename To::changed_pred,
+        typename To::break_condition, typename To::changed_pred,
         recorded_flags<Changed>(),
         (To::size >= 56 ? 0 : To::size + 1)>;
 
@@ -1043,8 +1030,9 @@ using meta_transfer_until_condition_o =
     meta_object<void, meta_transfer_until_condition<BF>>;
 
 template <class To, class From, class ChangedPred>
-using meta_stream_s_o =
-    meta_states_object<meta_stream<To, From>, meta_stream_s_f, ChangedPred>;
+using meta_stream_s_o = meta_states_object<meta_stream<To, From>,
+                                          meta_stream_s_f, ChangedPred,
+                                          meta_states_details::meta_states_always_continue>;
 
 struct meta_stream_always_continue {
   template <class in_stream_t>
@@ -1066,7 +1054,7 @@ concept meta_istream_t =
 
 template <class T>
 concept meta_ostream_t =
-    io_stream_transform_details::io_stream_traits::meta_ostream_t<T>;
+    meta_object_t<T>;
 
 using meta_range_continue = io_stream_transform_details::meta_always_false_c_o;
 
@@ -1220,7 +1208,8 @@ using meta_states_ostream =
     meta_states_object<TL,
                        io_stream_transform_details::meta_states_ostream_detail::
                            states_ostream_f<accept_pred>,
-                       accept_pred>;
+                       accept_pred,
+                       meta_states_details::meta_states_always_continue>;
 
 // A states-based iterator ostream: OBJ IS the flags, pred defaults to
 // always-changed.
@@ -1228,7 +1217,8 @@ using meta_states_iterator = meta_states_object<
     std::integral_constant<std::uint64_t, 0>,
     io_stream_transform_details::meta_states_iterator_detail::
         iterator_passthrough,
-    io_stream_transform_details::meta_states_iterator_detail::always_changed>;
+    io_stream_transform_details::meta_states_iterator_detail::always_changed,
+    meta_states_details::meta_states_always_continue>;
 // generate an index type for each element in the istream, starting from 'start'
 // note: this istream never ends
 template <std::size_t start>
@@ -1555,10 +1545,10 @@ struct seek_to {
   }
 };
 struct advance_f {
-  template <class this_seek, class from_ins>
-  using apply = seek_to<this_seek::advance_t::value, from_ins>;
-  template <class this_seek, class from_ins>
-  using initialize = seek_to<0, from_ins>;
+  template <class this_seek, class from_is>
+  using apply = seek_to<this_seek::advance_t::value, from_is>;
+  template <class from_is>
+  using initialize = seek_to<0, from_is>;
 };
 }  // namespace meta_aligned_iterator_details
 /// <summary>
@@ -1566,8 +1556,7 @@ struct advance_f {
 /// aligned address for a specific type in a byte stream, and it can also
 /// advance to the next aligned address for the next type.
 /// </summary>
-using meta_aligned_iterator =
-    meta_object_construct<meta_aligned_iterator_details::advance_f>;
+using meta_aligned_iterator = meta_object<meta_aligned_iterator_details::advance_f>;
 /// Reflection adapter: reflect a struct's non-static data members into an
 /// exp_list of their types, ready to feed meta_istream.
 /// Requires C++26 static reflection (GCC 16+, -std=c++26 -freflection).

@@ -12,6 +12,9 @@ namespace exp_utilities {
 namespace literal_types {
 struct no_exist_type : std::false_type {};
 
+template<class T>
+constexpr bool no_exist = std::is_same_v<T, no_exist_type>;
+
 struct end_of_list {
   using front = no_exist_type;
   using back = no_exist_type;
@@ -19,9 +22,18 @@ struct end_of_list {
 
 template <class T>
 struct error {
-  template <auto str>
+  template <class literal>
   struct message {
     static constexpr bool value = false;
+    static_assert(value);
+  };
+};
+template <class T, bool con>
+struct error_if {
+  template <class literal>
+  struct message {
+    static constexpr bool value = con;
+    static_assert(value);
   };
 };
 }  // namespace literal_types

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <bit>
+
 #include "meta_invoke_protocols.hpp"
 
 namespace meta_objects {
@@ -14,102 +16,109 @@ struct meta_empty_fn {
   template <class T, class...>
   using apply = T;
 };
-// Distinct from meta_empty (which is the payload of meta_empty_o, a valid empty
-// value): this tag marks a meta object that has not been constructed yet. It is
-// a pre-construction state and must never have operations (alignof, nested
-// member access, ...) applied to it.
+// Unlike meta_empty, which is a valid payload used by meta_empty_o, this tag
+// represents an object that has not yet been initialized. Do not inspect it as
+// a concrete value or apply operations that require a complete payload type.
 struct meta_uninitialized {};
 }  // namespace meta_objects_details
 
 namespace initialize_details {
-template <template <class...> class apply_shape>
+template <template <class...> class initializer_shape>
 struct meta_initializer_container {};
 
-template <class F, class En = void>
-struct is_initializer_type : std::false_type {};
-
 template <class F>
-struct is_initializer_type<
-    F, std::void_t<meta_initializer_container<F::template initialize>>>
-    : std::true_type {};
+concept has_initializer = requires{ typename meta_initializer_container<F::template initialize>; };
 
-template <class F>
-constexpr bool has_initializer = is_initializer_type<F>::value;
+template<class F>
+concept has_ret = requires{ typename meta_initializer_container<F::template apply_ret>; };
+
+template<class F>
+concept object_initializer = has_initializer<F> && is_meta_function_v<F> && !has_ret<F>;
+
+template<class F>
+concept ret_object_initializer = has_initializer<F> && is_meta_function_v<F> && has_ret<F>;
 
 template <class F>
 struct initialized {
-  template <class OBJ, class... Arg>
-  using apply = meta_invoke<F, OBJ, Arg...>;
+  template <class OBJ, class... Args>
+  using apply = meta_invoke<F, OBJ, Args...>;
 };
 
-template <class F, class... Arg>
-struct initialize {
-  using type = typename F::template initialize<Arg...>;
+template <class F, class... Args>
+struct initialize_t {
+  using type = typename F::template initialize<Args...>;
 };
-
-// with_constructor: equip a meta function F with a constructor. While the host
-// object still holds the Uninit tag, its first invocation runs F::initialize
-// (the constructor); every later invocation runs F::apply. The branch is lazy
-// (if constexpr), so the apply body is never formed over the uninitialized tag
-// and cannot trigger e.g. alignof(meta_uninitialized) or missing members.
-template <class F, class Uninit = meta_objects_details::meta_uninitialized>
-struct with_constructor {
- private:
-  template <class Obj, class... Args>
-  consteval static auto step() {
-    if constexpr (std::is_same_v<Obj, Uninit>) {
-      return std::type_identity<
-          typename F::template initialize<Obj, Args...>>{};
-    } else {
-      return std::type_identity<
-          typename F::template apply<Obj, Args...>>{};
-    }
-  }
-
- public:
-  template <class Obj, class... Args>
-  using apply = typename decltype(step<Obj, Args...>())::type;
-};
+template<class F, class... Args>
+using initialize = typename initialize_t<F, Args...>::type;
 }  // namespace initialize_details
 
 using initialize_details::has_initializer;
 using initialize_details::initialize;
-using initialize_details::initialized;
-using initialize_details::with_constructor;
+using meta_invoke_protocols::meta_function_template_container;
 
-/*A meta obj is a bind of a meta_function and an obj, each time it is invoked,
-it update itself to a new type, use ::type to get the inner obj. The object is a
-dumb carrier: constructor (initialize) support is added by wrapping F with
-with_constructor, not by specializing the object.*/
-template <class OBJ, class F /*Define how to Update an obj*/>
-struct meta_object {
+template<class T>
+concept meta_object_t = requires{
+  typename meta_function_template_container<T::template meta_set>;
+  typename meta_function_template_container<T::template apply>;
+  typename T::function;
+};
+
+template<class T>
+constexpr bool is_uninitialized_meta_object = (meta_object_t<T> && !exp_utilities::has_type<T>);
+
+using initialize_details::object_initializer;
+using meta_objects_details::meta_uninitialized;
+
+// Primary declaration for the meta-object forms defined below.
+template<class ...>
+struct meta_object;
+
+// An initializer-only meta_object creates its initial payload from invocation
+// arguments by calling F::initialize.
+template<object_initializer F>
+struct meta_object<F>{
   using function = F;
-  using type = OBJ;
-  template <class... Arg>
-  using apply = meta_object<meta_invoke<F, OBJ, Arg...>, F>;
-
-  template <class ANOTHER_OBJ>
+  template<class ...Args>
+  using apply = meta_object<initialize<function, Args...>,  function>;
+  template<class ANOTHER_OBJ>
   using meta_set = meta_object<ANOTHER_OBJ, F>;
 };
 
-// Construct a meta_object that needs no usable seed: it starts holding the
-// meta_uninitialized tag, F::initialize runs on the first invocation (the
-// constructor) and F::apply on every later one.
-template <class F>
-using meta_object_construct =
-    meta_object<meta_objects_details::meta_uninitialized, with_constructor<F>>;
+// Binds a payload to a meta-function. Each invocation applies F to the current
+// payload and returns a new meta_object containing the resulting payload.
+template <class OBJ, class F>
+struct meta_object<OBJ, F> {
+  using function = F;
+  using type = OBJ;
+  template <class... Arg>
+  using apply = meta_object<meta_invoke<F, OBJ, Arg...>, function>;
 
-// Backwards-compatible name (old meta_object_init required has_initializer<F>).
-template <class F>
-using meta_object_init = meta_object_construct<F>;
+  template <class ANOTHER_OBJ>
+  using meta_set = meta_object<ANOTHER_OBJ, function>;
+};
 
-// A meta_ret_object is a meta_object that also exposes ::ret (a value derived
-// from its state via Ret), which lets it act as a source/transform. Like
-// meta_object it is a dumb, single-definition carrier. Constructor support is
-// added compositionally: wrap F with with_constructor for the update, and have
-// Ret map the uninitialized tag to an idle value supplied by the upper layer.
+using initialize_details::ret_object_initializer;
+// Primary declaration for meta_ret_object's initializer and bound forms.
+template<class...>
+struct meta_ret_object;
+
+template<object_initializer F, class Ret>
+struct meta_ret_object<F, Ret>{
+  using function = F;
+  using ret = meta_uninitialized;
+  template<class ...Args>
+  using apply = meta_ret_object<initialize<function, Args...>, function, Ret>;
+
+  template<class ANOTHER_OBJ>
+  using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
+};
+// A meta_ret_object carries both its current payload and a derived result.
+// Ret maps the payload to ::ret, allowing the object to expose a value distinct
+// from its update state. F controls state updates; Ret controls result
+// projection. An initializer can use meta_uninitialized until its first
+// invocation establishes a concrete payload.
 template <class OBJ, class F, class Ret>
-struct meta_ret_object {
+struct meta_ret_object <OBJ, F, Ret>{
   using function = F;
   using ret = meta_invoke<Ret, OBJ>;
   using type = OBJ;
@@ -120,139 +129,11 @@ struct meta_ret_object {
   using meta_set = meta_ret_object<ANOTHER_OBJ, F, Ret>;
 };
 
-namespace meta_states_details {
-// low 56 bits: change history
-// high 8 bits: opr_code (never touched by next_flags)
-constexpr std::uint64_t FLAGS_LOW_MASK = (1ULL << 56) - 1;
-
-template <bool Changed, std::uint64_t Flags, std::size_t Index>
-consteval std::uint64_t next_flags() {
-  // extract high 8 bits (opr_code)
-  constexpr std::uint64_t opr_code = Flags & ~FLAGS_LOW_MASK;
-  // low 56 bits: change history
-  constexpr std::uint64_t low_flags = Flags & FLAGS_LOW_MASK;
-
-  if constexpr (Index >= 56) {
-    // overflow: reset low 56 bits to 0, keep high bits
-    if constexpr (Changed) {
-      return opr_code | 1ULL;  // reset and set first bit
-    } else {
-      return opr_code;  // just reset
-    }
-  } else {
-    if constexpr (Changed) {
-      return opr_code | (low_flags | (1ULL << Index));
-    } else {
-      return Flags;
-    }
-  }
-}
-
-// detect whether F::apply accepts an extra integral_constant<uint64_t, flags>
-template <class F, class Obj, class... Args>
-concept apply_takes_flags = requires {
-  typename F::template apply<Obj, Args...,
-                             std::integral_constant<std::uint64_t, 0>>;
+template<class T>
+concept meta_ret_object_t = meta_object_t<T> &&requires{
+  typename T::ret;
 };
 
-// detect on_changed<Obj, Args...>
-template <class F, class Obj, class... Args>
-concept has_on_changed =
-    requires { typename F::template on_changed<Obj, Args...>; };
-
-template <class F, class Obj, bool Changed, std::uint64_t Flags, class... Args>
-consteval auto compute_next_type() {
-  if constexpr (Changed && has_on_changed<F, Obj, Args...>) {
-    return std::type_identity<typename F::template on_changed<Obj, Args...>>{};
-  } else if constexpr (apply_takes_flags<F, Obj, Args...>) {
-    return std::type_identity<typename F::template apply<
-        Obj, Args..., std::integral_constant<std::uint64_t, Flags>>>{};
-  } else {
-    return std::type_identity<typename F::template apply<Obj, Args...>>{};
-  }
-}
-}  // namespace meta_states_details
-
-template <class OBJ, class F, class Changed_Pred, std::uint64_t byte_flag = 0,
-          std::size_t flag_index = 0>
-  requires meta_function_t<F> && meta_function_t<Changed_Pred>
-struct meta_states_object {
-  using type = OBJ;
-  using function = F;
-  using changed_pred = Changed_Pred;
-  static constexpr std::uint64_t flags = byte_flag;
-  static constexpr std::size_t size = flag_index;
-  static constexpr bool last_changed =
-      flag_index != 0 &&
-      ((byte_flag >> (flag_index - 1)) & std::uint64_t{1}) != 0;
-
-  template <class ANOTHER_OBJ>
-  using meta_set =
-      meta_states_object<ANOTHER_OBJ, F, Changed_Pred, byte_flag, flag_index>;
-
-  template <std::size_t I>
-    requires(I < flag_index && I < std::numeric_limits<std::uint64_t>::digits)
-  static constexpr bool at() noexcept {
-    return ((byte_flag >> I) & std::uint64_t{1}) != 0;
-  }
-
-  template <class... Args>
-  using changed = meta_invoke<Changed_Pred, OBJ, Args...>;
-
-  template <class... Args>
-  static consteval std::uint64_t new_flags() {
-    return meta_states_details::next_flags<changed<Args...>::value, byte_flag,
-                                           flag_index>();
-  }
-
-  template <class... Args>
-  using next_type = typename decltype(meta_states_details::compute_next_type<
-                                      F, OBJ, changed<Args...>::value,
-                                      new_flags<Args...>(), Args...>())::type;
-
-  // reset_flag_index: reset flag_index to 0, keep everything else
-  using reset_flag_index = meta_states_object<OBJ, F, Changed_Pred,
-                                             byte_flag, 0>;
-
-  // apply_impl: helper to avoid instantiating both branches of conditional
-  template <bool Overflow, class... Args>
-  struct apply_impl;
-
-  template <class... Args>
-  struct apply_impl<false, Args...> {
-    using type = meta_states_object<next_type<Args...>, F, Changed_Pred,
-                                   new_flags<Args...>(), flag_index + 1>;
-  };
-
-  template <class... Args>
-  struct apply_impl<true, Args...> {
-    using type = meta_states_object<next_type<Args...>, F, Changed_Pred,
-                                   new_flags<Args...>(), 0>;
-  };
-
-  template <class... Args>
-  using apply = typename apply_impl<(flag_index >= 56), Args...>::type;
-};
-
-namespace meta_states_details {
-template <class T>
-consteval bool changed_value() {
-  if constexpr (requires { T::last_changed; }) {
-    return T::last_changed;
-  }
-  return true;
-}
-}  // namespace meta_states_details
-
-// observe_default: the default, generic observer for the looper. It is a
-// unary meta-function that reports whether a stage changed by reading the
-// states object's own change bit (changed_value). It is the looper's runtime
-// callback gate; it is distinct from the states change predicate a user picks
-// (ostream/istream/cache/stream_observer).
-struct observe_default {
-  template <class Stage>
-  using apply = std::bool_constant<meta_states_details::changed_value<Stage>()>;
-};
 
 namespace meta_timer_object_details {
 struct meta_break_signal : std::false_type {};
@@ -283,18 +164,18 @@ struct stop_forward_next_if_break_f_is_true<
 };
 }  // namespace meta_timer_object_details
 
-// since modifying to timer is forbidden, there is no initializer for
-// meta_timer_object
+// A countdown wrapper that applies F while its break predicate allows the
+// timer to advance. It intentionally has no initializer form: the payload and
+// remaining count are supplied when the wrapper is created.
 template <std::size_t times, class OBJ, class F,
           class break_f =
-              // when true, looper breaks
+        // A true predicate stops the countdown.
           meta_timer_object_details::meta_always_continue>
 struct meta_timer_object {
   using timer = meta_invoke<
 
-      // meta_break_if<Pred, Default_if_false_t>, Arg>
-      // if(Pred<Arg> == true) return meta_break_signal
-      // else return Default_if_false_t
+      // Emit a break signal when break_f accepts the current timer value;
+      // otherwise preserve the default result indicating whether time remains.
       meta_timer_object_details::meta_break_if<
           break_f, std::integral_constant<bool, (times > 0)>>,
       OBJ>;
@@ -335,7 +216,7 @@ template <class OBJ, size_t N,
 using to_timer =
     typename meta_timer_object_details::To_Timer<OBJ, N, break_f>::type;
 
-// set a break condition for meta_timer_object
+// Returns the same timer wrapper with BF installed as its break predicate.
 template <class MTO, class BF>
 using break_if =
     exp_utilities::get_type<meta_timer_object_details::Break_If<MTO, BF>>;
@@ -346,14 +227,14 @@ struct meta_transfer_object_impl {
   using type = typename To_T::template meta_set<typename From_T::type>;
 };
 
-// transfer timer if invoke to a meta_timer_oect
+// Transfer the timer's computed status to the destination object's payload.
 template <size_t times, class obj, class F, class To_T, class B>
 struct meta_transfer_object_impl<meta_timer_object<times, obj, F, B>, To_T> {
   using type = typename To_T::template meta_set<
       typename meta_timer_object<times, obj, F, B>::timer>;
 };
 
-// transfer returns if invoke to a meta_ret_object
+// Transfer the projected result when the source is a meta_ret_object.
 template <class Ret, class obj, class F, class To_T>
 struct meta_transfer_object_impl<meta_ret_object<obj, F, Ret>, To_T> {
   using type = typename To_T::template meta_set<
@@ -366,25 +247,330 @@ using meta_transfer_object =
     typename meta_objects_invoke_details::meta_transfer_object_impl<From_T,
                                                                     To_T>::type;
 
-namespace meta_objects_invoke_details {
-// the meta_object is itself a meta_function
-// if two meta_objects invoked, invoke the first object with type in second
-// object
-template <class OBJ1, class OBJ2>
-struct Meta_Object_Invoke {
-  using type = meta_invoke<OBJ1, typename OBJ2::type>;
+namespace meta_op_bits {
+
+using u64 = std::uint64_t;
+using u16 = std::uint16_t;
+using u8  = std::uint8_t;
+
+template<u64 flags>
+using u64_int_t = std::integral_constant<u64, flags>;
+
+// ===== 全局控制：bit 56 ~ 63 =====
+constexpr u64 G_CONTINUE   = 1ull << 63; // 1=继续，0=终止。对应你说的终止位
+constexpr u64 G_NOT_SKIP   = 1ull << 62; // 1=调用回调，0=编译期跳过回调分支
+// 以下两位决定【本轮循环结束后】投递给用户回调（或后续 meta_pipe）的解包协议，
+// 不影响 looper 如何推进生成器/接收器。参考 meta_ios::protocols::stream_to/cache/from_t。
+constexpr u64 G_FEED_GEN   = 1ull << 61; // 1=回调投递生成器结果，0=投递接收器结果
+constexpr u64 G_PACK       = 1ull << 60; // 1=回调投递 pack<Generator,Receiver,State,Index>
+constexpr u64 G_FORWARD    = 1ull << 59; // 1=正向 gen->recv->cond，0=反向 recv->gen->cond
+constexpr u64 G_HOOK_MASK  = 0x7ull << 56; // bit56~58：中断/钩子 id，0 表示无
+constexpr int G_HOOK_SHIFT = 56;
+
+// ===== 数据区：bit 0 ~ 15 =====
+constexpr u64 D_COUNT_MASK    = 0xFFFFull; // 整个数据区
+constexpr u64 D_INDEX_MASK    = 0x00FFull; // 低 8 位：当前索引
+constexpr u64 D_OPERAND_MASK  = 0xFF00ull; // 高 8 位：操作数
+constexpr int D_OPERAND_SHIFT = 8;
+
+// ===== slot 区 =====
+constexpr int SLOT0_SHIFT = 16; // 生成器指令，16 位
+constexpr int SLOT1_SHIFT = 32; // 接收器指令，16 位
+constexpr int SLOT2_SHIFT = 48; // 条件/自定义指令，只留 8 位
+constexpr u64 SLOT0_MASK  = 0xFFFFull << SLOT0_SHIFT;
+constexpr u64 SLOT1_MASK  = 0xFFFFull << SLOT1_SHIFT;
+constexpr u64 SLOT2_MASK  = 0x00FFull << SLOT2_SHIFT;
+
+// ===== slot 内部布局 =====
+// slot 低 8 位：修饰/基础动作
+constexpr u16 S_INIT       = 1u << 0; // 调用 initialize
+constexpr u16 S_APPLY      = 1u << 1; // 调用 apply
+constexpr u16 S_TYPE_LIST  = 1u << 2; // 内部持有类型列表
+constexpr u16 S_CLEAR      = 1u << 3; // 调用后清空/重置
+constexpr u16 S_APPEND     = 1u << 4; // 追加到目标列表
+constexpr u16 S_PREPEND    = 1u << 5; // 前插到目标列表
+constexpr u16 S_FROM_TAIL  = 1u << 6; // 从源列表尾部取
+constexpr u16 S_CONSUME    = 1u << 7; // 复制后消耗源
+
+// slot 高 8 位：opcode
+enum SlotOp : u8 {
+    OP_NONE = 0,
+    OP_INIT,
+    OP_APPLY,
+    OP_COPY_N,
+    OP_CONCAT,
+    OP_TAKE,
+    OP_DROP,
+    OP_REVERSE,
+    OP_HOOK,
+
+    // 高频专用组合，直接表达“从哪复制到哪”
+    OP_COPY_RECV_N_TO_RECV_LIST,
+    OP_COPY_RECV_N_TO_GEN_LIST,
+    OP_APPEND_GEN_TO_RECV_LIST,
+    OP_PREPEND_GEN_TO_RECV_LIST,
+    OP_CONCAT_RECV_TO_RECV_LIST,
 };
 
-// if invoke with meta_ret_object, invoke the first object with returns
-template <class OBJ1, class Obj2, class F, class Ret>
-struct Meta_Object_Invoke<OBJ1, meta_ret_object<Obj2, F, Ret>> {
-  using type = meta_invoke<OBJ1, typename meta_ret_object<Obj2, F, Ret>::ret>;
+constexpr u16 slot_code(SlotOp op, u16 mods = 0) {
+    return static_cast<u16>((static_cast<u16>(op) << 8) | mods);
+}
+
+//default ops：全局控制位之外，slot0（生成器）和 slot1（接收器）默认执行 apply。
+// 默认置 G_PACK：像 meta_stream 那样产出 pack 状态作为回调 stage / 最终 type。
+constexpr u64 default_ops = G_CONTINUE | G_NOT_SKIP | G_FEED_GEN | G_FORWARD | G_PACK
+    | (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)
+    | (static_cast<u64>(S_APPLY) << SLOT1_SHIFT);
+
+template<u64 flags>
+struct flags_operator : u64_int_t<flags>
+{
+  // 置位：把 bit 指定的位设为 1
+  template<u64 bit>
+  using opSet = u64_int_t<flags | bit>;
+  // 清位：把 bit 指定的位设为 0，其余位保持不变
+  template<u64 bit>
+  using opDeact = u64_int_t<flags & ~bit>;
+  // 索引 +1（8 位回绕，不影响操作数和其余区域）
+  using inc_index = u64_int_t<(flags & ~D_INDEX_MASK) | ((flags + 1) & D_INDEX_MASK)>;
+  // 当前索引：数据区低 8 位
+  using index = u64_int_t<flags & D_INDEX_MASK>;
+  // 当前操作数：数据区高 8 位
+  using operand = u64_int_t<((flags & D_OPERAND_MASK) >> D_OPERAND_SHIFT)>;
+  static constexpr u64 value = flags;
+};
+
+// ===== flags 变换步骤：一元元函数，输入/输出都是带 ::value 的 u64 类型 =====
+// 无条件置位/清位
+template<u64 new_bits>
+struct set_f{
+  template<class flags_t>
+  using apply = u64_int_t<flags_t::value | new_bits>;
+};
+template<u64 new_bits>
+struct deact_f{
+  template<class flags_t>
+  using apply = u64_int_t<flags_t::value & ~new_bits>;
+};
+// 条件置位/清位：active 为 false 时原样返回 flags_t
+template<u64 new_bits, bool active>
+struct set_if_f{
+  template<class flags_t>
+  using apply = std::conditional_t<active,
+      u64_int_t<flags_t::value | new_bits>, flags_t>;
+};
+template<u64 new_bits, bool active>
+struct deact_if_f{
+  template<class flags_t>
+  using apply = std::conditional_t<active,
+      u64_int_t<flags_t::value & ~new_bits>, flags_t>;
+};
+// 索引 +1（8 位回绕，不影响操作数和其余区域）
+struct inc_index_f{
+  template<class flags_t>
+  using apply = u64_int_t<(flags_t::value & ~D_INDEX_MASK)
+                          | ((flags_t::value + 1) & D_INDEX_MASK)>;
+};
+
+// flags_fold：直接接收 flags 类型，内部为每个 Step 补上 ::template apply
+// 并交给 meta_fold 做左折叠。Step 约定：template<class flags_t> apply。
+template<class flags_t, class... Steps>
+using flags_fold = flags_operator<meta_fold<flags_t, Steps::template apply...>::value>;
+
+// 检测是否为 flags_operator 的实例
+template<class T>
+struct is_flags_operator : std::false_type {};
+template<u64 flags>
+struct is_flags_operator<flags_operator<flags>> : std::true_type {};
+template<class T>
+constexpr bool is_flags_operator_v = is_flags_operator<T>::value;
+
+// ===== loop_op：按 flags 特化的原子推进操作 =====
+// 职责：只负责按 flags 推进 generator/state（gen apply、结果喂 state），
+// 返回新的 (state, gen) 对。用户回调由 looper 按 G_NOT_SKIP 单独控制。
+//
+// 关键位：
+//   bit63 G_CONTINUE       是否继续（0 时 looper 不应再调用 loop_op）
+//   bit17 slot0 S_APPLY    是否推进生成器（generator apply）
+//   bit33 slot1 S_APPLY    是否把生成器结果喂给接收器 state
+//
+// 主模板：未识别的 flags 组合。
+template<u64 flags>
+struct loop_op;
+
+namespace loop_op_detail {
+  // 从 flags 提取关键布尔量
+  template<u64 flags>
+  constexpr bool slot0_apply_v = (flags & (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)) != 0;
+  template<u64 flags>
+  constexpr bool slot1_apply_v = (flags & (static_cast<u64>(S_APPLY) << SLOT1_SHIFT)) != 0;
+}  // namespace loop_op_detail
+
+
+}  // namespace meta_op_bits
+using meta_op_bits::flags_fold;
+using meta_op_bits::flags_operator;
+using meta_op_bits::default_ops;
+using meta_op_bits::u64;
+using meta_op_bits::inc_index_f;
+
+// 默认耗尽探测：优先使用 end_of_stream 协议（MOBJ::type::end）。
+// 用户可自定义 Probe 替换以适配无该协议的生成器。
+namespace meta_states_details {
+  template<class T, class = void>
+  struct probe_end : std::false_type {};
+  template<class T>
+  struct probe_end<T, std::void_t<decltype(T::end)>>
+      : std::bool_constant<T::end> {};
+}  // namespace meta_states_details
+
+// 默认探测元函数：step 给出一个 fold 步骤，耗尽时清 G_CONTINUE。
+struct default_probe_f {
+  // 满足 meta_function_t 约束（probe 不作为 fold 步骤，仅占位）
+  template<class T>
+  using apply = T;
+  template<class MOBJ>
+  using step = meta_op_bits::deact_if_f<
+      meta_op_bits::G_CONTINUE,
+      meta_states_details::probe_end<typename MOBJ::type>::value>;
+};
+
+//the meta_states_object is an object play as conditions in meta_looper
+//it receives meta_signals and set its flags to control the looper's behavior
+//Probe<MOBJ>::step 给出"根据生成器状态变换 flags"的 fold 步骤；默认检测耗尽。
+//
+// 两阶段探测（生成器/接收器解耦）：
+//   probe_generator<Generator>  观测生成器 → 定 slot0（含未初始化时置 S_INIT），index 不增
+//   probe_receiver<GenResult>   观测接收器阶段 → 定 slot1，最后递增 index
+template<class Flags = flags_operator<default_ops>, class Probe = default_probe_f, meta_function_t ...Fn>
+struct meta_states_object{
+  using flags = Flags;
+  using probe = Probe;
+
+  // 阶段一：观测生成器，生成本轮 flags 的生成器部分。
+  // 初始化修正【先】跑：未初始化时 slot0=S_INIT、关 slot0 S_APPLY、关 G_NOT_SKIP
+  // （初始化轮只初始化生成器，不调回调）；已初始化时清 S_INIT、恢复 S_APPLY。
+  // Fn 与 Probe 后跑：可在其上覆盖（含非初始化轮重新打开 G_NOT_SKIP）。
+  template<meta_object_t Generator>
+  using probe_generator = meta_states_object<
+      flags_fold<flags,
+          meta_op_bits::set_if_f<
+              (static_cast<meta_op_bits::u64>(meta_op_bits::S_INIT) << meta_op_bits::SLOT0_SHIFT),
+              is_uninitialized_meta_object<Generator>>,
+          meta_op_bits::deact_if_f<
+              (static_cast<meta_op_bits::u64>(meta_op_bits::S_INIT) << meta_op_bits::SLOT0_SHIFT),
+              !is_uninitialized_meta_object<Generator>>,
+          meta_op_bits::deact_if_f<
+              (static_cast<meta_op_bits::u64>(meta_op_bits::S_APPLY) << meta_op_bits::SLOT0_SHIFT),
+              is_uninitialized_meta_object<Generator>>,
+          meta_op_bits::set_if_f<
+              (static_cast<meta_op_bits::u64>(meta_op_bits::S_APPLY) << meta_op_bits::SLOT0_SHIFT),
+              !is_uninitialized_meta_object<Generator>>,
+          meta_op_bits::deact_if_f<
+              meta_op_bits::G_NOT_SKIP,
+              is_uninitialized_meta_object<Generator>>,
+          // 已初始化：恢复 G_NOT_SKIP 默认开（Fn 后跑仍可覆盖关闭）
+          meta_op_bits::set_if_f<
+              meta_op_bits::G_NOT_SKIP,
+              !is_uninitialized_meta_object<Generator>>,
+          Fn...,
+          typename Probe::template step<Generator>>,
+      Probe, Fn...>;
+
+  // 阶段二：观测接收器阶段的结果（生成器操作后的对象 GenResult），定 slot1，递增 index。
+  // Probe::step<GenResult> 在【生成器推进后】检测耗尽：
+  //   若本轮产出已是 end_of_list / 列表已空 → 清 G_CONTINUE 并关 slot1，
+  //   阻止把 end_of_list 喂给接收器（避免多跑一次）。
+  template<class GenResult>
+  using probe_receiver = meta_states_object<
+      flags_fold<flags, typename Probe::template step<GenResult>, inc_index_f>,
+      Probe, Fn...>;
+
+  // 兼容旧式整体 apply：等价于一次整体探测。
+  template<meta_object_t MOBJ>
+  using apply = meta_states_object<
+      flags_fold<flags, Fn..., typename Probe::template step<MOBJ>, inc_index_f>,
+      Probe, Fn...>;
+
+  // meta_object_t 要求：重置内部 flags
+  template<class ANOTHER_FLAGS>
+  struct meta_set_helper {
+    static_assert(meta_op_bits::is_flags_operator_v<ANOTHER_FLAGS>,
+                  "meta_states_object::meta_set requires a flags_operator type");
+    using type = meta_states_object<ANOTHER_FLAGS, Probe, Fn...>;
+  };
+  template<class ANOTHER_FLAGS>
+  using meta_set = typename meta_set_helper<ANOTHER_FLAGS>::type;
+
+  using type = flags;
+  static constexpr u64 value = flags::value;
+};
+
+// 检测是否为 meta_states_object 的实例
+template<class T>
+struct is_meta_states_object : std::false_type {};
+template<class Flags, class Probe, class ...Fn>
+struct is_meta_states_object<meta_states_object<Flags, Probe, Fn...>> : std::true_type {};
+template<class T>
+constexpr bool is_meta_states_object_v = is_meta_states_object<T>::value;
+
+namespace meta_objects_invoke_details {
+// Treat the first meta-object as a meta-function and invoke it with the
+// payload held by the second object.
+template <class OBJ1, class OBJ2, class ...Args>
+struct Meta_Object_Invoke {
+  using type = meta_invoke<OBJ1, typename OBJ2::type, Args...>;
+};
+
+// For a meta_ret_object source, pass its projected result rather than its
+// internal payload to the target meta-function.
+// 禁用：当目标是 meta_states_object 时由目标特化接管（需要观察源对象本身）。
+template <class OBJ1, class Obj2, class F, class Ret, class ...Args>
+  requires(!is_meta_states_object_v<OBJ1>)
+struct Meta_Object_Invoke<OBJ1, meta_ret_object<Obj2, F, Ret>, Args...> {
+  using type = meta_invoke<OBJ1, typename meta_ret_object<Obj2, F, Ret>::ret, Args...>;
+};
+
+// meta_states_object as source: directly invoke OBJ1 on the states object
+// itself (it is already a meta-object carrying flags), not on its ::type.
+// 禁用：当目标也是 meta_states_object 时由目标特化接管。
+template <class OBJ1, class Flags, class Probe, class ...Fn, class ...Args>
+  requires(!is_meta_states_object_v<OBJ1>)
+struct Meta_Object_Invoke<OBJ1, meta_states_object<Flags, Probe, Fn...>, Args...> {
+  using type = meta_invoke<OBJ1, meta_states_object<Flags, Probe, Fn...>, Args...>;
+};
+
+// meta_states_object as destination: it must observe the *source object
+// itself* (e.g. a generator's meta-object) to inspect its state, so pass the
+// source meta-object through unmodified instead of unwrapping its ::type/ret.
+template <class Flags, class Probe, class ...Fn, class OBJ2, class ...Args>
+  requires meta_object_t<OBJ2>
+struct Meta_Object_Invoke<meta_states_object<Flags, Probe, Fn...>, OBJ2, Args...> {
+  using type = meta_invoke<meta_states_object<Flags, Probe, Fn...>, OBJ2, Args...>;
 };
 
 }  // namespace meta_objects_invoke_details
 template <class OBJ1, class OBJ2>
 using meta_object_invoke =
     typename meta_objects_invoke_details::Meta_Object_Invoke<OBJ1, OBJ2>::type;
+
+namespace meta_objects_invoke_details {
+// 按协议解包元对象的【产出】（不调用）：
+//   meta_object      -> ::type
+//   meta_ret_object  -> ::ret
+// 这是 cache 的来源：生成器产出但未被接收器消费的值。
+template <class MO, class = void>
+struct meta_produce {
+  using type = typename MO::type;  // 默认：meta_object 的产出是 ::type
+};
+template <class MO>
+struct meta_produce<MO, std::void_t<typename MO::ret>> {
+  using type = typename MO::ret;   // meta_ret_object 的产出是 ::ret
+};
+}  // namespace meta_objects_invoke_details
+
+template <class MO>
+using meta_produce_t = typename meta_objects_invoke_details::meta_produce<MO>::type;
 
 namespace invoke_object_if_details {
 template <bool, class MO1, class MO2>
@@ -409,116 +595,87 @@ struct invoke_object_if {
 namespace meta_loop {
 using namespace meta_objects;
 
-// Note: All template parameters are meta objects
+// The looper condition, state, and generator are meta objects.
 namespace meta_looper_detail {
-template <bool, class Condition, class OBJ, class Generator = meta_empty_o,
-          class Observer = observe_default>
+template <bool, class Condition, class OBJ, class Generator = meta_empty_o>
 struct meta_looper_impl {
   template <class... Args>
   struct apply {
-    // transfer current obj to  condition_obj to judge
-    // transfer different context based on types of meta_object
+    // Adapt the current state to the condition's expected input, then evaluate
+    // whether another iteration should run.
     using _continue_t =
         typename meta_invoke<meta_transfer_object<OBJ, Condition>>::type;
     static const bool _continue_ = _continue_t::value;
 
-    // invoke generator object if condition is true
+    // Advance the generator only when the condition permits another iteration.
     using generator_stage_o =
         meta_invoke<invoke_if<_continue_>, Generator, Args...>;
 
-    // invoke Obj object if condition is true
+    // Apply the generated input to the current state when continuing; otherwise
+    // retain the current state as the final result.
     using result_stage_o =
         meta_invoke<invoke_object_if<_continue_>, OBJ, generator_stage_o>;
-    using observe_result = meta_invoke<Observer, result_stage_o>;
 
-    // recursively loop for result
+    // Instantiate the next iteration only when the condition remains true.
     using track_apply_t =
         meta_invoke<invoke_if<_continue_>,
                     meta_looper_impl<_continue_, Condition, result_stage_o,
-                                     generator_stage_o, Observer>,
+                     generator_stage_o>,
                     Args...>;
     using type = typename track_apply_t::type;
 
     template <class... arg_types>
     static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
-      // 把当前阶段类型抽出来，后面推导返回类型时更干净。
       using stage_t = typename result_stage_o::type;
 
-      if constexpr (!observe_result::value) {
-        // 当前阶段不需要观察：不实例化 f，只负责继续递归。
-        if constexpr (_continue_) {
+      using return_type =
+          std::invoke_result_t<decltype(f), stage_t, arg_types...>;
+
+      if constexpr (std::is_void_v<return_type>) {
+        if constexpr (track_apply_t::_continue_) {
+          std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
           return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
         } else {
-          // No more stages ahead. Return void.
-          return;
+          return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
         }
       } else {
-        // 直接用 std::invoke_result_t 推导 f(stage_t{}, args...) 的返回类型，
-        // 不再手写 decltype(std::invoke(...))。
-        using return_type =
-            std::invoke_result_t<decltype(f), stage_t, arg_types...>;
-
-        if constexpr (std::is_void_v<return_type>) {
-          // 返回 void：和非 void 分支一样，检查下一层是否继续
-          // 下一层继续：调用后递归；下一层停止：调用后直接结束
-          if constexpr (track_apply_t::_continue_) {
-            std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-            return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-          }
+        if constexpr (track_apply_t::_continue_) {
+          (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+          return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
         } else {
-          // 返回非 void：不提前构造 ret_val。
-          // 后续还要递归时丢弃当前返回值，否则直接返回当前调用结果。
-          if constexpr (track_apply_t::_continue_) {
-            (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-            return track_apply_t::for_each(f,
-                                           std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<arg_types>(args)...);
-          }
+          return std::invoke(f, stage_t{},
+                             std::forward<arg_types>(args)...);
         }
       }
     }
 
-    // Overload: fold a pack of unary metafunctions into each stage BEFORE the
-    // value is handed to the callable f. Only the value passed to f is folded;
-    // the loop machinery is unchanged.
+    // Applies each unary metafunction in Ps to the stage type before invoking
+    // f. The folded type is used only for the callback; loop state is unchanged.
     template <template <class> class... Ps, class... arg_types>
       requires(sizeof...(Ps) > 0)
     static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
       using raw_stage = typename result_stage_o::type;
       using stage_t = meta_fold<raw_stage, Ps...>;
 
-      if constexpr (!observe_result::value) {
-        if constexpr (_continue_) {
+      using return_type =
+          std::invoke_result_t<decltype(f), stage_t, arg_types...>;
+      if constexpr (std::is_void_v<return_type>) {
+        if constexpr (track_apply_t::_continue_) {
+          std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
           return track_apply_t::template for_each<Ps...>(
               f, std::forward<arg_types>(args)...);
         } else {
-          return;
+          return std::invoke(f, stage_t{},
+                             std::forward<arg_types>(args)...);
         }
       } else {
-        using return_type =
-            std::invoke_result_t<decltype(f), stage_t, arg_types...>;
-        if constexpr (std::is_void_v<return_type>) {
-          if constexpr (track_apply_t::_continue_) {
-            std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-            return track_apply_t::template for_each<Ps...>(
-                f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<arg_types>(args)...);
-          }
+        if constexpr (track_apply_t::_continue_) {
+          (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+          return track_apply_t::template for_each<Ps...>(
+              f, std::forward<arg_types>(args)...);
         } else {
-          if constexpr (track_apply_t::_continue_) {
-            (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-            return track_apply_t::template for_each<Ps...>(
-                f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<arg_types>(args)...);
-          }
+          return std::invoke(f, stage_t{},
+                             std::forward<arg_types>(args)...);
         }
       }
     }
@@ -527,47 +684,35 @@ struct meta_looper_impl {
     static constexpr decltype(auto) for_each_forward(auto&& f,
                                                      first_arg_type&& first,
                                                      arg_types&&... args) {
-      // 同样抽出当前阶段类型。
       using stage_t = typename result_stage_o::type;
 
-      if constexpr (!observe_result::value) {
-        if constexpr (_continue_ && sizeof...(arg_types)) {
+      using return_type =
+          std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
+
+      if constexpr (std::is_void_v<return_type>) {
+        if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
+          std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
           return track_apply_t::for_each_forward(
               f, std::forward<arg_types>(args)...);
         } else {
-          // No more observing stages ahead. Return void.
-          return;
+          return std::invoke(f, stage_t{},
+                             std::forward<first_arg_type>(first));
         }
       } else {
-        // 只推导对第一个参数调用时的返回类型。
-        using return_type =
-            std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
-
-        if constexpr (std::is_void_v<return_type>) {
-          // 和非 void 分支一样，检查下一层是否继续且还有参数
-          if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
-            std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
-            return track_apply_t::for_each_forward(
-                f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<first_arg_type>(first));
-          }
+        if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
+          (void)std::invoke(f, stage_t{},
+                            std::forward<first_arg_type>(first));
+          return track_apply_t::for_each_forward(
+              f, std::forward<arg_types>(args)...);
         } else {
-          if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
-            (void)std::invoke(f, stage_t{},
-                              std::forward<first_arg_type>(first));
-            return track_apply_t::for_each_forward(
-                f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<first_arg_type>(first));
-          }
+          return std::invoke(f, stage_t{},
+                             std::forward<first_arg_type>(first));
         }
       }
     }
 
-    // Overload: unary metafunctions folded into each stage before calling f.
+    // Forward one input argument to each callback, applying Ps to the stage
+    // type first. Additional arguments are forwarded to subsequent iterations.
     template <template <class> class... Ps, class first_arg_type,
               class... arg_types>
       requires(sizeof...(Ps) > 0)
@@ -576,58 +721,282 @@ struct meta_looper_impl {
       using raw_stage = typename result_stage_o::type;
       using stage_t = meta_fold<raw_stage, Ps...>;
 
-      if constexpr (!observe_result::value) {
-        if constexpr (_continue_ && sizeof...(arg_types)) {
+      using return_type =
+          std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
+      if constexpr (std::is_void_v<return_type>) {
+        if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
+          std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
           return track_apply_t::template for_each_forward<Ps...>(
               f, std::forward<arg_types>(args)...);
         } else {
-          return;
+          return std::invoke(f, stage_t{},
+                             std::forward<first_arg_type>(first));
         }
       } else {
-        using return_type =
-            std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
-        if constexpr (std::is_void_v<return_type>) {
-          if constexpr (track_apply_t::_continue_ &&
-                        sizeof...(arg_types)) {
-            std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
-            return track_apply_t::template for_each_forward<Ps...>(
-                f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<first_arg_type>(first));
-          }
+        if constexpr (track_apply_t::_continue_ && sizeof...(arg_types)) {
+          (void)std::invoke(f, stage_t{},
+                            std::forward<first_arg_type>(first));
+          return track_apply_t::template for_each_forward<Ps...>(
+              f, std::forward<arg_types>(args)...);
         } else {
-          if constexpr (track_apply_t::_continue_ &&
-                        sizeof...(arg_types)) {
-            (void)std::invoke(f, stage_t{},
-                              std::forward<first_arg_type>(first));
-            return track_apply_t::template for_each_forward<Ps...>(
-                f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{},
-                               std::forward<first_arg_type>(first));
-          }
+          return std::invoke(f, stage_t{},
+                             std::forward<first_arg_type>(first));
         }
       }
     }
   };
 };
 
-template <class Cond, class MO, class Generator, class Observer>
-struct meta_looper_impl<false, Cond, MO, Generator, Observer> {
+template <class Cond, class MO, class Generator>
+struct meta_looper_impl<false, Cond, MO, Generator> {
   static constexpr bool _continue_ = false;
   using type = typename MO::type;
 };
+
+// ===== meta_states_object 作为条件的特化：flags 驱动 =====
+// 当 Condition 是 meta_states_object 时，looper 行为由 flags 位指导：
+//   - 用 states_object 探测 Generator 生成/更新 flags
+//   - 按 flags 调用 loop_op<flags> 原子化推进（gen apply、结果喂 state）
+//   - bit62 G_NOT_SKIP 只控制 for_each 是否调用用户回调
+//   - “跳过”= 推进生成器但不喂接收器，由 slot1 的 S_APPLY 位指定
+namespace states_looper_detail {
+  using namespace meta_op_bits;
+
+  // ===== gen_op：对生成器的原子操作（由 slot0 驱动）=====
+  // 只负责推进/初始化生成器，返回新生成器。不触碰接收器。
+  template<u64 flags, class Generator, class... Args>
+  struct gen_op;
+
+  // slot0 S_INIT：初始化生成器（未初始化形态，调 apply<Args...> 触发 initialize）。
+  // 初始化接收 looper 的外部参数 Args。
+  template<u64 flags, class Generator, class... Args>
+    requires((flags & (static_cast<u64>(S_INIT) << SLOT0_SHIFT)) != 0)
+  struct gen_op<flags, Generator, Args...> {
+    using type = meta_invoke<Generator, Args...>;  // 初始化（带外部参数）
+  };
+
+  // slot0 S_APPLY（且无 S_INIT）：推进生成器。
+  template<u64 flags, class Generator, class... Args>
+    requires((flags & (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)) != 0 &&
+             (flags & (static_cast<u64>(S_INIT) << SLOT0_SHIFT)) == 0)
+  struct gen_op<flags, Generator, Args...> {
+    using type = meta_invoke<Generator, Args...>;
+  };
+
+  // slot0 无操作：生成器保持。
+  template<u64 flags, class Generator, class... Args>
+    requires((flags & (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)) == 0 &&
+             (flags & (static_cast<u64>(S_INIT) << SLOT0_SHIFT)) == 0)
+  struct gen_op<flags, Generator, Args...> {
+    using type = Generator;
+  };
+
+  // ===== recv_op：对接收器的原子操作（由 slot1 驱动）=====
+  // 输入是生成器操作后的对象；拆包由 meta_object_invoke 决定。
+  template<u64 flags, class OBJ, class GenResult>
+  struct recv_op;
+
+  // slot1 S_APPLY：用生成器结果 invoke 接收器。
+  template<u64 flags, class OBJ, class GenResult>
+    requires((flags & (static_cast<u64>(S_APPLY) << SLOT1_SHIFT)) != 0)
+  struct recv_op<flags, OBJ, GenResult> {
+    using type = meta_object_invoke<OBJ, GenResult>;
+  };
+
+  // slot1 无操作：接收器保持（跳过）。
+  template<u64 flags, class OBJ, class GenResult>
+    requires((flags & (static_cast<u64>(S_APPLY) << SLOT1_SHIFT)) == 0)
+  struct recv_op<flags, OBJ, GenResult> {
+    using type = OBJ;
+  };
+
+  // ===== loop_pack：打包本轮状态供用户回调 / 下一阶段（meta_pipe）解包 =====
+  // 参考 meta_stream：打包 Generator/Receiver/State/Index，并暴露常用探测成员。
+  // cache = 生成器产出（按协议解包）但未被接收器消费的部分。
+  template <class Gen, class Recv, class State, u64 Index>
+  struct loop_pack {
+    using generator = Gen;
+    using receiver = Recv;
+    using state = State;
+    static constexpr u64 index = Index;
+
+    // 生成器产出但未被接收器消费的值（按 meta_produce 协议解包）
+    using cache = meta_produce_t<Gen>;
+
+    // 常用解包视图
+    using gen_t = typename Gen::type;
+    using state_t = typename State::type;
+    static constexpr bool gen_end = requires { Gen::type::end; } && Gen::type::end;
+    consteval u64 index_v() const { return Index; }
+  };
+
+  // 产出 stage：G_PACK 置位时打包 loop_pack，否则按 G_FEED_GEN 选生成器/接收器结果。
+  // Gen=生成器操作后对象，RecvObj=接收器操作后对象（接收器结果），OldRecv=接收器操作前。
+  template<u64 flags, class Gen, class RecvObj, class States>
+  struct make_stage {
+    static constexpr u64 idx = States::flags::index::value;
+    using type = std::conditional_t<(flags & G_PACK) != 0,
+        loop_pack<Gen, RecvObj, RecvObj, idx>,
+        std::conditional_t<(flags & G_FEED_GEN) != 0,
+            Gen, RecvObj>>;
+  };
+}  // namespace states_looper_detail
+
+namespace states_looper_detail {
+  // 递归下一迭代的分派：continue_ 为 false 时不实例化下一迭代（避免对空生成器再探测）。
+  // 终止时产出最终 type：G_PACK 置位则为 pack，否则为接收器结果。
+  template<u64 flags, bool continue_, class cur_states_t, class new_state, class new_gen, class... Args>
+  struct next_step {
+    using type = typename make_stage<flags, new_gen, new_state, cur_states_t>::type;
+    template <class... arg_types>
+    static constexpr decltype(auto) for_each(auto&&, arg_types&&...) {
+      return;
+    }
+    template <class first_arg_type, class... arg_types>
+    static constexpr decltype(auto) for_each_forward(auto&&, first_arg_type&&, arg_types&&...) {
+      return;
+    }
+  };
+  template<u64 flags, class cur_states_t, class new_state, class new_gen, class... Args>
+  struct next_step<flags, true, cur_states_t, new_state, new_gen, Args...> {
+    using recurse_apply_t = typename meta_looper_impl<true, cur_states_t, new_state, new_gen>
+        ::template apply<Args...>;
+    using type = typename recurse_apply_t::type;
+    template <class... arg_types>
+    static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
+      return recurse_apply_t::for_each(f, std::forward<arg_types>(args)...);
+    }
+    template <class first_arg_type, class... arg_types>
+    static constexpr decltype(auto) for_each_forward(auto&& f, first_arg_type&& first, arg_types&&... args) {
+      return recurse_apply_t::for_each_forward(f, std::forward<first_arg_type>(first), std::forward<arg_types>(args)...);
+    }
+  };
+}  // namespace states_looper_detail
+
+// 特化：Condition 为 meta_states_object，分阶段流水线（生成器/接收器解耦）。
+//   阶段A：states_object.probe_generator<Generator> → 定 slot0 → gen_op 推进/初始化生成器
+//   阶段B：states_object.probe_receiver<GenResult>   → 定 slot1 → recv_op 喂接收器 → 递增 index
+//   bit62 G_NOT_SKIP 只控制 for_each 是否调用用户回调。
+template <class Flags, class Probe, class... Fn, class OBJ, class Generator>
+struct meta_looper_impl<true, meta_states_object<Flags, Probe, Fn...>, OBJ, Generator> {
+  using states_t = meta_states_object<Flags, Probe, Fn...>;
+
+  template <class... Args>
+  struct apply {
+    // ===== 阶段 A：探测生成器，按 slot0 操作生成器 =====
+    using gen_states_t = typename states_t::template probe_generator<Generator>;
+    static constexpr meta_op_bits::u64 gen_flags_v = gen_states_t::flags::value;
+    static constexpr bool continue_ = (gen_flags_v & meta_op_bits::G_CONTINUE) != 0;
+
+    // 对生成器执行 slot0 操作（continue_ 为 false 时静止，避免推空生成器）
+    using new_gen = typename std::conditional_t<continue_,
+        states_looper_detail::gen_op<gen_flags_v, Generator, Args...>,
+        states_looper_detail::gen_op<0, Generator, Args...>
+        >::type;
+
+    // ===== 阶段 B：探测接收器阶段，按 slot1 操作接收器，递增 index =====
+    using final_states_t = typename gen_states_t::template probe_receiver<new_gen>;
+    static constexpr meta_op_bits::u64 flags_v = final_states_t::flags::value;
+
+    // 对接收器执行 slot1 操作（输入是生成器操作后的 new_gen）
+    using new_state = typename std::conditional_t<continue_,
+        states_looper_detail::recv_op<flags_v, OBJ, new_gen>,
+        states_looper_detail::recv_op<0, OBJ, new_gen>
+        >::type;
+
+    // 递归下一迭代（continue_ 为 false 时不实例化）。
+    // 最终产出的 type 由 next_step 一路传到终止轮产出（G_PACK 则为 pack）。
+    using next_t = states_looper_detail::next_step<flags_v, continue_, final_states_t, new_state, new_gen, Args...>;
+    using type = typename next_t::type;
+
+    template <class... arg_types>
+    static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
+      // 投递给回调的 stage：G_PACK 置位时为 pack，否则按 G_FEED_GEN 选生成器/接收器结果
+      using stage_t = typename states_looper_detail::make_stage<flags_v, new_gen, new_state, final_states_t>::type;
+      // bit62 G_NOT_SKIP 即 observe：0 时编译期跳过回调分支——
+      // 不推导 return_type、不实例化 f，只负责递归。
+      constexpr bool observe = (flags_v & meta_op_bits::G_NOT_SKIP) != 0;
+
+      if constexpr (!observe) {
+        // 当前阶段不需要观察：不实例化 f，只递归。
+        if constexpr (continue_) {
+          return next_t::for_each(f, std::forward<arg_types>(args)...);
+        } else {
+          // 没有更多阶段，返回 void。
+          return;
+        }
+      } else {
+        using return_type =
+            std::invoke_result_t<decltype(f), stage_t, arg_types...>;
+
+        if constexpr (std::is_void_v<return_type>) {
+          // 返回 void：检查下一层是否继续
+          if constexpr (continue_) {
+            std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+            return next_t::for_each(f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+          }
+        } else {
+          // 返回非 void：不提前构造返回值。
+          // 后续还要递归时丢弃当前返回值，否则直接返回当前调用结果。
+          if constexpr (continue_) {
+            (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+            return next_t::for_each(f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+          }
+        }
+      }
+    }
+
+    // 每轮消费一个参数 first 喂给 f(stage_t, first)，剩余 args 传给下一轮。
+    // observe=false 时不实例化 f、不推导返回类型，仅按剩余参数继续递归。
+    template <class first_arg_type, class... arg_types>
+    static constexpr decltype(auto) for_each_forward(auto&& f, first_arg_type&& first, arg_types&&... args) {
+      using stage_t = typename states_looper_detail::make_stage<flags_v, new_gen, new_state, final_states_t>::type;
+      constexpr bool observe = (flags_v & meta_op_bits::G_NOT_SKIP) != 0;
+      // 是否还有下一轮参数可供 forward
+      constexpr bool has_next = continue_ && (sizeof...(arg_types) > 0);
+
+      if constexpr (!observe) {
+        // 不实例化 f：仅消费 first，按剩余参数递归。
+        if constexpr (has_next) {
+          return next_t::for_each_forward(f, std::forward<arg_types>(args)...);
+        } else {
+          return;
+        }
+      } else {
+        using return_type =
+            std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
+
+        if constexpr (std::is_void_v<return_type>) {
+          if constexpr (has_next) {
+            std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+            return next_t::for_each_forward(f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+          }
+        } else {
+          if constexpr (has_next) {
+            (void)std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+            return next_t::for_each_forward(f, std::forward<arg_types>(args)...);
+          } else {
+            return std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
+          }
+        }
+      }
+    }
+  };
+};
 }  // namespace meta_looper_detail
 
-template <class C, class O, class G, class Observer = observe_default,
-          class... ARG_Tys>
+template <class C, class O, class G, class... ARG_Tys>
 using meta_looper_t = typename meta_invoke<
-    meta_looper_detail::meta_looper_impl<true, C, O, G, Observer>,
+  meta_looper_detail::meta_looper_impl<true, C, O, G>,
     ARG_Tys...>::type;
 
-template <class C, class O, class G = meta_empty_o,
-          class Observer = observe_default>
+template <class C, class O, class G = meta_empty_o>
 using meta_looper =
-    meta_looper_detail::meta_looper_impl<true, C, O, G, Observer>;
+  meta_looper_detail::meta_looper_impl<true, C, O, G>;
 }  // namespace meta_loop
