@@ -194,6 +194,159 @@ struct meta_timer_object {
 };
 using meta_empty_o = meta_object<meta_objects_details::meta_empty,
                                  meta_objects_details::meta_empty_fn>;
+
+// meta_op_bits 是 meta_looper 的布局，定义在后面的 meta_loop 区域。
+// MSO 的 meta_set 需要 is_flags_operator 检查载体，这里前向声明（延迟实例化时解析）。
+namespace meta_op_bits {
+
+using u64 = std::uint64_t;
+using u16 = std::uint16_t;
+using u8  = std::uint8_t;
+
+template<u64 flags>
+using u64_int_t = std::integral_constant<u64, flags>;
+
+// ===== flags 变换步骤：一元元函数，输入/输出都是带 ::value 的 u64 类型 =====
+// 无条件置位/清位
+template<u64 new_bits>
+struct set_f{
+  template<class flags_t>
+  using apply = u64_int_t<flags_t::value | new_bits>;
+};
+template<u64 new_bits>
+struct deact_f{
+  template<class flags_t>
+  using apply = u64_int_t<flags_t::value & ~new_bits>;
+};
+// 条件置位/清位：active 为 false 时原样返回 flags_t
+template<u64 new_bits, bool active>
+struct set_if_f{
+  template<class flags_t>
+  using apply = std::conditional_t<active,
+      u64_int_t<flags_t::value | new_bits>, flags_t>;
+};
+template<u64 new_bits, bool active>
+struct deact_if_f{
+  template<class flags_t>
+  using apply = std::conditional_t<active,
+      u64_int_t<flags_t::value & ~new_bits>, flags_t>;
+};
+
+// ===== 字段宽度/掩码的命名空间级 trait（支持 bool 作为 1bit）=====
+namespace flags_field_details {
+  // 字段位宽：bool 为 1bit，其余为 sizeof(T)*8
+  template <class T>
+  struct field_bits : std::integral_constant<std::size_t, sizeof(T) * 8> {};
+  template <>
+  struct field_bits<bool> : std::integral_constant<std::size_t, 1> {};
+
+  template <class T>
+  constexpr std::size_t field_bits_v = field_bits<T>::value;
+
+  // 字段的全 1 掩码值（未移位）：bool -> 1，其余 -> T(-1)
+  template <class T>
+  constexpr u64 field_ones =
+      field_bits_v<T> == 64 ? ~u64{0} : ((u64{1} << field_bits_v<T>) - 1);
+
+  // 字段掩码（移位到 shift）
+  template <class T, std::size_t shift>
+  constexpr u64 field_mask = field_ones<T> << shift;
+}  // namespace flags_field_details
+
+template<u64 flags>
+struct flags_operator : u64_int_t<flags>
+{
+  // ===== 原始按位操作（u64 掩码）=====
+  template<u64 bit>
+  using opSet = u64_int_t<flags | bit>;
+  template<u64 bit>
+  using opDeact = u64_int_t<flags & ~bit>;
+
+  // ===== 字段访问：指定类型 + 偏移 =====
+  // 生成指定位置的字段掩码（bool 为 1bit）
+  template<class uintegral_type, std::size_t shift>
+  static constexpr u64 mask = flags_field_details::field_mask<uintegral_type, shift>;
+
+  // 获取指定位置的字段值，右移到最低位后按字段类型返回
+  template<class uintegral_type, std::size_t shift>
+  static constexpr uintegral_type get =
+      static_cast<uintegral_type>((flags & mask<uintegral_type, shift>) >> shift);
+
+  // ===== 字段写入：set<T, shift, value> =====
+  // 把字段类型的值 value 写入从 shift 开始的字段（掩码内），其他位清零后写入。
+  template<class uintegral_type, std::size_t shift, uintegral_type value>
+  using set = flags_operator<
+      (flags & ~mask<uintegral_type, shift>) |
+      ((static_cast<u64>(value) << shift) & mask<uintegral_type, shift>)>;
+
+  // ===== 字段清空：deact<T, shift> =====
+  // 把从 shift 开始的字段清零，其余位不变。
+  template<class uintegral_type, std::size_t shift>
+  using deact = flags_operator<flags & ~mask<uintegral_type, shift>>;
+
+  // ===== 条件字段写入/清空 =====
+  template<bool con, class uintegral_type, std::size_t shift, uintegral_type value>
+  using set_if = std::conditional_t<con,
+      set<uintegral_type, shift, value>, flags_operator<flags>>;
+  template<bool con, class uintegral_type, std::size_t shift>
+  using deact_if = std::conditional_t<con,
+      deact<uintegral_type, shift>, flags_operator<flags>>;
+};
+template<class T>
+struct is_flags_operator : std::false_type {};
+template<u64 flags>
+struct is_flags_operator<flags_operator<flags>> : std::true_type {};
+template <class T>
+constexpr bool is_flags_operator_v = is_flags_operator<T>::value;
+}  // namespace meta_op_bits
+
+// ===== meta_states_object（MSO）：持有 flags 的纯状态元对象 =====
+// 它是 MO 的普通一员，符合 MO 调用规范：
+//   - meta_invoke<MSO, objects...> 返回 MSO 的新状态
+//   - MO 之间可相互调用（见 Meta_Object_Invoke 的 MSO 协议特化）
+// MSO 自身不知道"生成器/接收器/looper"，那些是 meta_looper 用 MSO 实现条件判断的行为。
+//
+// 用户的 Fn 接收 flags_operator（this_flags），用 set/deact/set_if/deact_if 链式变换，
+// Fn::apply<this_flags, objects...> 的结果成为新 MSO 的 flags。
+//
+// 签名：template<class Flags, class Fn>
+// meta_states_object返回指定类型生成的特定bits
+// meta_states_object 的产出是 ::flags
+// meta_states_object 不规定bits的具体定义，请使用者自己实现自定义的bits布局
+
+using meta_op_bits::flags_operator;
+template<class T>
+concept flags_operator_type = meta_op_bits::is_flags_operator_v<T>;
+
+template <flags_operator_type Flags, class Fn>
+struct meta_states_object {
+  using flags = Flags;
+  using function = Fn;
+
+  // 变参 apply：把 flags 和传入的 objects 一起交给用户的 Fn。
+  // Fn::apply<flags, objects...>,正如其他MSO，以及meta_invoke的定义，apply直接就是指定类型，不需要::type解压
+  template <class... objects>
+  using apply = meta_states_object<
+      meta_invoke<Fn, flags, objects...>, Fn>;
+
+  // 直接使用 flags_operator 类型进行重置
+  template <flags_operator_type ANOTHER_FLAGS>
+  using meta_set = meta_states_object<ANOTHER_FLAGS, Fn>;
+
+  // MSO 的产物是它的 flags。
+  using type = flags;
+  static constexpr auto value = flags::value;
+};
+// 检测是否为 meta_states_object 的实例（定义见 meta_timer_object 之后）。
+// MSO 的 Flags 载体约定为 meta_op_bits::flags_operator。
+template<class T>
+struct is_meta_states_object : std::false_type {};
+template<class Flags, class Fn>
+struct is_meta_states_object<meta_states_object<Flags, Fn>> : std::true_type {};
+template<class T>
+constexpr bool is_meta_states_object_v = is_meta_states_object<T>::value;
+
+
 namespace meta_timer_object_details {
 template <class OBJ, size_t N, class break_f>
 struct To_Timer {};
@@ -222,7 +375,7 @@ using break_if =
     exp_utilities::get_type<meta_timer_object_details::Break_If<MTO, BF>>;
 
 namespace meta_objects_invoke_details {
-template <class From_T, class To_T>
+template <class From_T, class To_T> requires(!is_meta_states_object_v<From_T>)
 struct meta_transfer_object_impl {
   using type = typename To_T::template meta_set<typename From_T::type>;
 };
@@ -249,12 +402,7 @@ using meta_transfer_object =
 
 namespace meta_op_bits {
 
-using u64 = std::uint64_t;
-using u16 = std::uint16_t;
-using u8  = std::uint8_t;
 
-template<u64 flags>
-using u64_int_t = std::integral_constant<u64, flags>;
 
 // ===== 全局控制：bit 56 ~ 63 =====
 constexpr u64 G_CONTINUE   = 1ull << 63; // 1=继续，0=终止。对应你说的终止位
@@ -317,73 +465,18 @@ constexpr u16 slot_code(SlotOp op, u16 mods = 0) {
 }
 
 //default ops：全局控制位之外，slot0（生成器）和 slot1（接收器）默认执行 apply。
+// slot 指令用 opcode（slot_code(OP_APPLY)）写入字段高 8 位。
 // 默认置 G_PACK：像 meta_stream 那样产出 pack 状态作为回调 stage / 最终 type。
-constexpr u64 default_ops = G_CONTINUE | G_NOT_SKIP | G_FEED_GEN | G_FORWARD | G_PACK
-    | (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)
-    | (static_cast<u64>(S_APPLY) << SLOT1_SHIFT);
+constexpr u64 default_ops = G_CONTINUE | (G_NOT_SKIP & ~G_FEED_GEN) | G_FORWARD | G_PACK
+    | (static_cast<u64>(slot_code(OP_APPLY)) << SLOT0_SHIFT)
+    | (static_cast<u64>(slot_code(OP_APPLY)) << SLOT1_SHIFT);
 
-template<u64 flags>
-struct flags_operator : u64_int_t<flags>
-{
-  // 置位：把 bit 指定的位设为 1
-  template<u64 bit>
-  using opSet = u64_int_t<flags | bit>;
-  // 清位：把 bit 指定的位设为 0，其余位保持不变
-  template<u64 bit>
-  using opDeact = u64_int_t<flags & ~bit>;
-  // 索引 +1（8 位回绕，不影响操作数和其余区域）
-  using inc_index = u64_int_t<(flags & ~D_INDEX_MASK) | ((flags + 1) & D_INDEX_MASK)>;
-  // 当前索引：数据区低 8 位
-  using index = u64_int_t<flags & D_INDEX_MASK>;
-  // 当前操作数：数据区高 8 位
-  using operand = u64_int_t<((flags & D_OPERAND_MASK) >> D_OPERAND_SHIFT)>;
-  static constexpr u64 value = flags;
-};
-
-// ===== flags 变换步骤：一元元函数，输入/输出都是带 ::value 的 u64 类型 =====
-// 无条件置位/清位
-template<u64 new_bits>
-struct set_f{
-  template<class flags_t>
-  using apply = u64_int_t<flags_t::value | new_bits>;
-};
-template<u64 new_bits>
-struct deact_f{
-  template<class flags_t>
-  using apply = u64_int_t<flags_t::value & ~new_bits>;
-};
-// 条件置位/清位：active 为 false 时原样返回 flags_t
-template<u64 new_bits, bool active>
-struct set_if_f{
-  template<class flags_t>
-  using apply = std::conditional_t<active,
-      u64_int_t<flags_t::value | new_bits>, flags_t>;
-};
-template<u64 new_bits, bool active>
-struct deact_if_f{
-  template<class flags_t>
-  using apply = std::conditional_t<active,
-      u64_int_t<flags_t::value & ~new_bits>, flags_t>;
-};
 // 索引 +1（8 位回绕，不影响操作数和其余区域）
 struct inc_index_f{
   template<class flags_t>
   using apply = u64_int_t<(flags_t::value & ~D_INDEX_MASK)
                           | ((flags_t::value + 1) & D_INDEX_MASK)>;
 };
-
-// flags_fold：直接接收 flags 类型，内部为每个 Step 补上 ::template apply
-// 并交给 meta_fold 做左折叠。Step 约定：template<class flags_t> apply。
-template<class flags_t, class... Steps>
-using flags_fold = flags_operator<meta_fold<flags_t, Steps::template apply...>::value>;
-
-// 检测是否为 flags_operator 的实例
-template<class T>
-struct is_flags_operator : std::false_type {};
-template<u64 flags>
-struct is_flags_operator<flags_operator<flags>> : std::true_type {};
-template<class T>
-constexpr bool is_flags_operator_v = is_flags_operator<T>::value;
 
 // ===== loop_op：按 flags 特化的原子推进操作 =====
 // 职责：只负责按 flags 推进 generator/state（gen apply、结果喂 state），
@@ -408,111 +501,11 @@ namespace loop_op_detail {
 
 
 }  // namespace meta_op_bits
-using meta_op_bits::flags_fold;
 using meta_op_bits::flags_operator;
 using meta_op_bits::default_ops;
 using meta_op_bits::u64;
 using meta_op_bits::inc_index_f;
 
-// 默认耗尽探测：优先使用 end_of_stream 协议（MOBJ::type::end）。
-// 用户可自定义 Probe 替换以适配无该协议的生成器。
-namespace meta_states_details {
-  template<class T, class = void>
-  struct probe_end : std::false_type {};
-  template<class T>
-  struct probe_end<T, std::void_t<decltype(T::end)>>
-      : std::bool_constant<T::end> {};
-}  // namespace meta_states_details
-
-// 默认探测元函数：step 给出一个 fold 步骤，耗尽时清 G_CONTINUE。
-struct default_probe_f {
-  // 满足 meta_function_t 约束（probe 不作为 fold 步骤，仅占位）
-  template<class T>
-  using apply = T;
-  template<class MOBJ>
-  using step = meta_op_bits::deact_if_f<
-      meta_op_bits::G_CONTINUE,
-      meta_states_details::probe_end<typename MOBJ::type>::value>;
-};
-
-//the meta_states_object is an object play as conditions in meta_looper
-//it receives meta_signals and set its flags to control the looper's behavior
-//Probe<MOBJ>::step 给出"根据生成器状态变换 flags"的 fold 步骤；默认检测耗尽。
-//
-// 两阶段探测（生成器/接收器解耦）：
-//   probe_generator<Generator>  观测生成器 → 定 slot0（含未初始化时置 S_INIT），index 不增
-//   probe_receiver<GenResult>   观测接收器阶段 → 定 slot1，最后递增 index
-template<class Flags = flags_operator<default_ops>, class Probe = default_probe_f, meta_function_t ...Fn>
-struct meta_states_object{
-  using flags = Flags;
-  using probe = Probe;
-
-  // 阶段一：观测生成器，生成本轮 flags 的生成器部分。
-  // 初始化修正【先】跑：未初始化时 slot0=S_INIT、关 slot0 S_APPLY、关 G_NOT_SKIP
-  // （初始化轮只初始化生成器，不调回调）；已初始化时清 S_INIT、恢复 S_APPLY。
-  // Fn 与 Probe 后跑：可在其上覆盖（含非初始化轮重新打开 G_NOT_SKIP）。
-  template<meta_object_t Generator>
-  using probe_generator = meta_states_object<
-      flags_fold<flags,
-          meta_op_bits::set_if_f<
-              (static_cast<meta_op_bits::u64>(meta_op_bits::S_INIT) << meta_op_bits::SLOT0_SHIFT),
-              is_uninitialized_meta_object<Generator>>,
-          meta_op_bits::deact_if_f<
-              (static_cast<meta_op_bits::u64>(meta_op_bits::S_INIT) << meta_op_bits::SLOT0_SHIFT),
-              !is_uninitialized_meta_object<Generator>>,
-          meta_op_bits::deact_if_f<
-              (static_cast<meta_op_bits::u64>(meta_op_bits::S_APPLY) << meta_op_bits::SLOT0_SHIFT),
-              is_uninitialized_meta_object<Generator>>,
-          meta_op_bits::set_if_f<
-              (static_cast<meta_op_bits::u64>(meta_op_bits::S_APPLY) << meta_op_bits::SLOT0_SHIFT),
-              !is_uninitialized_meta_object<Generator>>,
-          meta_op_bits::deact_if_f<
-              meta_op_bits::G_NOT_SKIP,
-              is_uninitialized_meta_object<Generator>>,
-          // 已初始化：恢复 G_NOT_SKIP 默认开（Fn 后跑仍可覆盖关闭）
-          meta_op_bits::set_if_f<
-              meta_op_bits::G_NOT_SKIP,
-              !is_uninitialized_meta_object<Generator>>,
-          Fn...,
-          typename Probe::template step<Generator>>,
-      Probe, Fn...>;
-
-  // 阶段二：观测接收器阶段的结果（生成器操作后的对象 GenResult），定 slot1，递增 index。
-  // Probe::step<GenResult> 在【生成器推进后】检测耗尽：
-  //   若本轮产出已是 end_of_list / 列表已空 → 清 G_CONTINUE 并关 slot1，
-  //   阻止把 end_of_list 喂给接收器（避免多跑一次）。
-  template<class GenResult>
-  using probe_receiver = meta_states_object<
-      flags_fold<flags, typename Probe::template step<GenResult>, inc_index_f>,
-      Probe, Fn...>;
-
-  // 兼容旧式整体 apply：等价于一次整体探测。
-  template<meta_object_t MOBJ>
-  using apply = meta_states_object<
-      flags_fold<flags, Fn..., typename Probe::template step<MOBJ>, inc_index_f>,
-      Probe, Fn...>;
-
-  // meta_object_t 要求：重置内部 flags
-  template<class ANOTHER_FLAGS>
-  struct meta_set_helper {
-    static_assert(meta_op_bits::is_flags_operator_v<ANOTHER_FLAGS>,
-                  "meta_states_object::meta_set requires a flags_operator type");
-    using type = meta_states_object<ANOTHER_FLAGS, Probe, Fn...>;
-  };
-  template<class ANOTHER_FLAGS>
-  using meta_set = typename meta_set_helper<ANOTHER_FLAGS>::type;
-
-  using type = flags;
-  static constexpr u64 value = flags::value;
-};
-
-// 检测是否为 meta_states_object 的实例
-template<class T>
-struct is_meta_states_object : std::false_type {};
-template<class Flags, class Probe, class ...Fn>
-struct is_meta_states_object<meta_states_object<Flags, Probe, Fn...>> : std::true_type {};
-template<class T>
-constexpr bool is_meta_states_object_v = is_meta_states_object<T>::value;
 
 namespace meta_objects_invoke_details {
 // Treat the first meta-object as a meta-function and invoke it with the
@@ -531,22 +524,21 @@ struct Meta_Object_Invoke<OBJ1, meta_ret_object<Obj2, F, Ret>, Args...> {
   using type = meta_invoke<OBJ1, typename meta_ret_object<Obj2, F, Ret>::ret, Args...>;
 };
 
-// meta_states_object as source: directly invoke OBJ1 on the states object
-// itself (it is already a meta-object carrying flags), not on its ::type.
-// 禁用：当目标也是 meta_states_object 时由目标特化接管。
-template <class OBJ1, class Flags, class Probe, class ...Fn, class ...Args>
-  requires(!is_meta_states_object_v<OBJ1>)
-struct Meta_Object_Invoke<OBJ1, meta_states_object<Flags, Probe, Fn...>, Args...> {
-  using type = meta_invoke<OBJ1, meta_states_object<Flags, Probe, Fn...>, Args...>;
+// ===== meta_states_object 的调用协议 =====
+// MSO 作为目标（obj != MSO）：直接调用 MSO 本身，规避默认拆 ::type。
+//   meta_object_invoke<MSO, obj> == meta_invoke<MSO, obj>
+template <class Flags, class Fn, class OBJ2, class ...Args>
+  requires(!is_meta_states_object_v<OBJ2>)
+struct Meta_Object_Invoke<meta_states_object<Flags, Fn>, OBJ2, Args...> {
+  using type = meta_invoke<meta_states_object<Flags, Fn>, OBJ2, Args...>;
 };
 
-// meta_states_object as destination: it must observe the *source object
-// itself* (e.g. a generator's meta-object) to inspect its state, so pass the
-// source meta-object through unmodified instead of unwrapping its ::type/ret.
-template <class Flags, class Probe, class ...Fn, class OBJ2, class ...Args>
-  requires meta_object_t<OBJ2>
-struct Meta_Object_Invoke<meta_states_object<Flags, Probe, Fn...>, OBJ2, Args...> {
-  using type = meta_invoke<meta_states_object<Flags, Probe, Fn...>, OBJ2, Args...>;
+// MSO 作为源：投递它的 flags 给目标元函数。
+//   meta_object_invoke<obj, MSO> == meta_invoke<obj, MSO::flags>
+//   对于所有元对象都生效，包括MSO
+template <class OBJ1, class Flags, class Fn, class ...Args>
+struct Meta_Object_Invoke<OBJ1, meta_states_object<Flags, Fn>, Args...> {
+  using type = meta_invoke<OBJ1, typename meta_states_object<Flags, Fn>::flags, Args...>;
 };
 
 }  // namespace meta_objects_invoke_details
@@ -558,6 +550,7 @@ namespace meta_objects_invoke_details {
 // 按协议解包元对象的【产出】（不调用）：
 //   meta_object      -> ::type
 //   meta_ret_object  -> ::ret
+//   meta_states_object -> ::flags
 // 这是 cache 的来源：生成器产出但未被接收器消费的值。
 template <class MO, class = void>
 struct meta_produce {
@@ -566,6 +559,10 @@ struct meta_produce {
 template <class MO>
 struct meta_produce<MO, std::void_t<typename MO::ret>> {
   using type = typename MO::ret;   // meta_ret_object 的产出是 ::ret
+};
+template <class MO>
+struct meta_produce<MO, std::void_t<typename MO::flags>> {
+  using type = typename MO::flags;   // meta_states_object 的产出是 ::flags
 };
 }  // namespace meta_objects_invoke_details
 
@@ -747,71 +744,123 @@ struct meta_looper_impl {
   };
 };
 
-template <class Cond, class MO, class Generator>
-struct meta_looper_impl<false, Cond, MO, Generator> {
-  static constexpr bool _continue_ = false;
-  using type = typename MO::type;
-};
+//此处提供Main_states 以及两个子states的元函数
+namespace states_based_condition_details{
+  using namespace meta_op_bits;
 
-// ===== meta_states_object 作为条件的特化：flags 驱动 =====
-// 当 Condition 是 meta_states_object 时，looper 行为由 flags 位指导：
-//   - 用 states_object 探测 Generator 生成/更新 flags
-//   - 按 flags 调用 loop_op<flags> 原子化推进（gen apply、结果喂 state）
-//   - bit62 G_NOT_SKIP 只控制 for_each 是否调用用户回调
-//   - “跳过”= 推进生成器但不喂接收器，由 slot1 的 S_APPLY 位指定
+  // 默认 Fn：什么都不做，flags 原样返回。
+  struct identity_f{
+    template<class this_flags, class...>
+    using apply = this_flags;
+  };
+
+  // 主 states 的 Fn：吸收子 states 算出的 flags，再过用户 Fn 得主 states 的新状态。
+  // Fn 什么都不做时，最终 flags = 子 states 算出的值。
+  template<class Fn>
+  struct main_states_f{
+    template<class this_flags, class sub_states_flags>
+    struct apply_impl{
+      using type = meta_invoke<Fn, sub_states_flags>;
+    };
+    template<class this_flags, class sub_states_flags>
+    using apply = typename apply_impl<this_flags, sub_states_flags>::type;
+  };
+
+  // 检测元对象产出是否为 end_of_list（无产出形态如 initializer 返回 false）
+  template<class MO, class = void>
+  struct produce_is_end : std::false_type {};
+  template<class MO>
+  struct produce_is_end<MO, std::void_t<meta_produce_t<MO>>>
+      : std::bool_constant<
+            std::is_same_v<meta_produce_t<MO>, exp_utilities::literal_types::end_of_list>> {};
+  template<class MO>
+  constexpr bool produce_is_end_v = produce_is_end<MO>::value;
+
+  // slot0 子 states 的 Fn：观测生成器，按初始化状态写 slot0 指令字段；
+  // 若生成器产出已是 end_of_list（耗尽），自动清 G_CONTINUE 停止循环。
+  //   未初始化 -> slot0 = slot_code(OP_INIT)（本轮只初始化生成器）
+  //   已初始化 -> slot0 = slot_code(OP_APPLY)（本轮推进生成器）
+  struct slot0_states_f{
+    template<class this_flags, class slot0_o>
+    struct apply_impl{
+      static constexpr bool is_uninitialized = is_uninitialized_meta_object<slot0_o>;
+      static constexpr u16 code =
+          slot_code(is_uninitialized ? OP_INIT : OP_APPLY);
+      // 生成器产出为 end_of_list（耗尽）时停止
+      static constexpr bool exhausted = produce_is_end_v<slot0_o>;
+      // 链式：写 slot0 指令字段，再按耗尽条件清 G_CONTINUE
+      using type = typename this_flags
+          ::template set<u16, SLOT0_SHIFT, code>
+          ::template deact_if<exhausted, bool, 63>;  // G_CONTINUE = bit63
+    };
+    template<class this_flags, class slot0_o>
+    using apply = typename apply_impl<this_flags, slot0_o>::type;
+  };
+
+  // slot1 子 states 的 Fn：观测接收器，按初始化状态写 slot1 指令字段。
+  //   未初始化 -> slot1 = slot_code(OP_INIT)
+  //   已初始化 -> slot1 = slot_code(OP_APPLY)
+  struct slot1_states_f{
+    template<class this_flags, class slot1_o>
+    struct apply_impl{
+      static constexpr bool is_uninitialized = is_uninitialized_meta_object<slot1_o>;
+      static constexpr u16 code =
+          slot_code(is_uninitialized ? OP_INIT : OP_APPLY);
+      using type = typename this_flags
+          ::template set<u16, SLOT1_SHIFT, code>;
+    };
+    template<class this_flags, class slot1_o>
+    using apply = typename apply_impl<this_flags, slot1_o>::type;
+  };
+}
+
+// ===== meta_looper 用 meta_states_object 实现条件判断的布局部件 =====
+// 这些原子操作由 slot flags 驱动，与 meta_states_object 解耦——MSO 只提供 flags。
 namespace states_looper_detail {
   using namespace meta_op_bits;
 
+  // 从 flags 提取 slot 的 opcode（高 8 位）
+  template<u64 flags, u64 shift>
+  constexpr SlotOp slot_opcode_v =
+      static_cast<SlotOp>((flags & (0xFFull << (shift + 8))) >> (shift + 8));
+
+  // 从 flags 读取 slot 的 opcode 是否要调用（INIT / APPLY 都调用）
+  template<u64 flags>
+  constexpr bool slot0_call_v =
+      (slot_opcode_v<flags, SLOT0_SHIFT> == OP_INIT) ||
+      (slot_opcode_v<flags, SLOT0_SHIFT> == OP_APPLY);
+  template<u64 flags>
+  constexpr bool slot1_call_v =
+      (slot_opcode_v<flags, SLOT1_SHIFT> == OP_INIT) ||
+      (slot_opcode_v<flags, SLOT1_SHIFT> == OP_APPLY);
+
   // ===== gen_op：对生成器的原子操作（由 slot0 驱动）=====
-  // 只负责推进/初始化生成器，返回新生成器。不触碰接收器。
-  template<u64 flags, class Generator, class... Args>
-  struct gen_op;
-
-  // slot0 S_INIT：初始化生成器（未初始化形态，调 apply<Args...> 触发 initialize）。
-  // 初始化接收 looper 的外部参数 Args。
-  template<u64 flags, class Generator, class... Args>
-    requires((flags & (static_cast<u64>(S_INIT) << SLOT0_SHIFT)) != 0)
-  struct gen_op<flags, Generator, Args...> {
-    using type = meta_invoke<Generator, Args...>;  // 初始化（带外部参数）
-  };
-
-  // slot0 S_APPLY（且无 S_INIT）：推进生成器。
-  template<u64 flags, class Generator, class... Args>
-    requires((flags & (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)) != 0 &&
-             (flags & (static_cast<u64>(S_INIT) << SLOT0_SHIFT)) == 0)
-  struct gen_op<flags, Generator, Args...> {
-    using type = meta_invoke<Generator, Args...>;
-  };
-
-  // slot0 无操作：生成器保持。
-  template<u64 flags, class Generator, class... Args>
-    requires((flags & (static_cast<u64>(S_APPLY) << SLOT0_SHIFT)) == 0 &&
-             (flags & (static_cast<u64>(S_INIT) << SLOT0_SHIFT)) == 0)
-  struct gen_op<flags, Generator, Args...> {
-    using type = Generator;
+  // 接收 flags_operator 类型，用其 get API 读取 slot0 的 opcode 分派。
+  // INIT / APPLY 是不同操作；修饰位（如 S_TYPE_LIST）保留在 flags 供后续优化读取。
+  template<class Flags, class Generator, class... Args>
+  struct gen_op {
+    static constexpr SlotOp op = static_cast<SlotOp>(Flags::template get<u8, SLOT0_SHIFT + 8>);
+    static constexpr bool call = (op == OP_INIT) || (op == OP_APPLY);
+    using type = meta_invoke<invoke_if<call>, Generator, Args...>;
   };
 
   // ===== recv_op：对接收器的原子操作（由 slot1 驱动）=====
-  // 输入是生成器操作后的对象；拆包由 meta_object_invoke 决定。
-  template<u64 flags, class OBJ, class GenResult>
-  struct recv_op;
-
-  // slot1 S_APPLY：用生成器结果 invoke 接收器。
-  template<u64 flags, class OBJ, class GenResult>
-    requires((flags & (static_cast<u64>(S_APPLY) << SLOT1_SHIFT)) != 0)
-  struct recv_op<flags, OBJ, GenResult> {
-    using type = meta_object_invoke<OBJ, GenResult>;
-  };
-
-  // slot1 无操作：接收器保持（跳过）。
-  template<u64 flags, class OBJ, class GenResult>
-    requires((flags & (static_cast<u64>(S_APPLY) << SLOT1_SHIFT)) == 0)
-  struct recv_op<flags, OBJ, GenResult> {
-    using type = OBJ;
+  // 接收 flags_operator 类型，用其 get API 读 slot1 修饰位。
+  // 两个元对象的调用走 meta_object_invoke 协议（拆包由它决定）：
+  // slot1 INIT 时用生成器产出初始化 receiver；APPLY 时用产出推进 receiver。
+  // slot1 关闭 = 跳过，接收器保持。
+  template<class Flags, class OBJ, class GenResult>
+  struct recv_op {
+    // slot1 的 opcode（高 8 位）：INIT / APPLY 时调用 receiver（INIT 用产出初始化，APPLY 用产出推进）
+    static constexpr SlotOp op = static_cast<SlotOp>(Flags::template get<u8, SLOT1_SHIFT + 8>);
+    static constexpr bool call = (op == OP_INIT) || (op == OP_APPLY);
+    // 生成器推进后的产出已是 end_of_list 时不喂（终止信号，不进入接收器）
+    static constexpr bool gen_produce_end =
+        std::is_same_v<meta_produce_t<GenResult>, exp_utilities::literal_types::end_of_list>;
+    using type = meta_invoke<invoke_object_if<call && !gen_produce_end>, OBJ, GenResult>;
   };
 
   // ===== loop_pack：打包本轮状态供用户回调 / 下一阶段（meta_pipe）解包 =====
-  // 参考 meta_stream：打包 Generator/Receiver/State/Index，并暴露常用探测成员。
   // cache = 生成器产出（按协议解包）但未被接收器消费的部分。
   template <class Gen, class Recv, class State, u64 Index>
   struct loop_pack {
@@ -831,10 +880,10 @@ namespace states_looper_detail {
   };
 
   // 产出 stage：G_PACK 置位时打包 loop_pack，否则按 G_FEED_GEN 选生成器/接收器结果。
-  // Gen=生成器操作后对象，RecvObj=接收器操作后对象（接收器结果），OldRecv=接收器操作前。
+  // index 读 flags 数据区低 8 位（get<u8, 0>）。
   template<u64 flags, class Gen, class RecvObj, class States>
   struct make_stage {
-    static constexpr u64 idx = States::flags::index::value;
+    static constexpr u64 idx = flags_operator<flags>::template get<u8, 0>;
     using type = std::conditional_t<(flags & G_PACK) != 0,
         loop_pack<Gen, RecvObj, RecvObj, idx>,
         std::conditional_t<(flags & G_FEED_GEN) != 0,
@@ -842,145 +891,132 @@ namespace states_looper_detail {
   };
 }  // namespace states_looper_detail
 
-namespace states_looper_detail {
-  // 递归下一迭代的分派：continue_ 为 false 时不实例化下一迭代（避免对空生成器再探测）。
-  // 终止时产出最终 type：G_PACK 置位则为 pack，否则为接收器结果。
-  template<u64 flags, bool continue_, class cur_states_t, class new_state, class new_gen, class... Args>
-  struct next_step {
-    using type = typename make_stage<flags, new_gen, new_state, cur_states_t>::type;
-    template <class... arg_types>
-    static constexpr decltype(auto) for_each(auto&&, arg_types&&...) {
-      return;
-    }
-    template <class first_arg_type, class... arg_types>
-    static constexpr decltype(auto) for_each_forward(auto&&, first_arg_type&&, arg_types&&...) {
-      return;
-    }
-  };
-  template<u64 flags, class cur_states_t, class new_state, class new_gen, class... Args>
-  struct next_step<flags, true, cur_states_t, new_state, new_gen, Args...> {
-    using recurse_apply_t = typename meta_looper_impl<true, cur_states_t, new_state, new_gen>
-        ::template apply<Args...>;
-    using type = typename recurse_apply_t::type;
-    template <class... arg_types>
-    static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
-      return recurse_apply_t::for_each(f, std::forward<arg_types>(args)...);
-    }
-    template <class first_arg_type, class... arg_types>
-    static constexpr decltype(auto) for_each_forward(auto&& f, first_arg_type&& first, arg_types&&... args) {
-      return recurse_apply_t::for_each_forward(f, std::forward<first_arg_type>(first), std::forward<arg_types>(args)...);
-    }
-  };
-}  // namespace states_looper_detail
+// looper 特化：Condition 为 meta_states_object。
+// 用一个主 MSO 统筹，两个独立子 MSO 分别观测生成器/接收器算出对应 slot 的 flags，
+// 主 MSO 吸收子结果作为新条件状态。
+// 元对象之间的调用走 meta_object_invoke 协议（MSO 作目标时收完整对象，作源时投递 flags）。
+template<class Condition, class Receiver, class Generator> requires is_meta_states_object_v<Condition>
+struct meta_looper_impl<true, Condition, Receiver, Generator> {
+  using states_t = Condition;
 
-// 特化：Condition 为 meta_states_object，分阶段流水线（生成器/接收器解耦）。
-//   阶段A：states_object.probe_generator<Generator> → 定 slot0 → gen_op 推进/初始化生成器
-//   阶段B：states_object.probe_receiver<GenResult>   → 定 slot1 → recv_op 喂接收器 → 递增 index
-//   bit62 G_NOT_SKIP 只控制 for_each 是否调用用户回调。
-template <class Flags, class Probe, class... Fn, class OBJ, class Generator>
-struct meta_looper_impl<true, meta_states_object<Flags, Probe, Fn...>, OBJ, Generator> {
-  using states_t = meta_states_object<Flags, Probe, Fn...>;
+  // 子 states 元函数：slot0 观测生成器，slot1 观测接收器
+  using slot0_o = meta_states_object<typename states_t::flags, states_based_condition_details::slot0_states_f>;
 
   template <class... Args>
   struct apply {
-    // ===== 阶段 A：探测生成器，按 slot0 操作生成器 =====
-    using gen_states_t = typename states_t::template probe_generator<Generator>;
-    static constexpr meta_op_bits::u64 gen_flags_v = gen_states_t::flags::value;
-    static constexpr bool continue_ = (gen_flags_v & meta_op_bits::G_CONTINUE) != 0;
+    // slot0：子 MSO 观测生成器（走 meta_object_invoke），写 slot0 指令
+    using slot0_states_t = meta_object_invoke<slot0_o, Generator>;
 
-    // 对生成器执行 slot0 操作（continue_ 为 false 时静止，避免推空生成器）
+    // slot1 是否被禁用（读 slot0 算出的 flags 的 slot1 修饰位）
+    static constexpr bool slot1_not_disable =
+        states_looper_detail::slot1_call_v<slot0_states_t::flags::value>;
+
+    // slot1：invoke_object_if 包装——slot1 未被禁用时子 MSO 才去观测 Receiver 写 slot1 指令；
+    // 被禁用（false）时 invoke_object_if 返回子 MSO 本身，flags 仍是 slot0 的结果（跳过接收器观测）。
+    using slot1_states_t = meta_invoke<
+        invoke_object_if<slot1_not_disable>,
+        meta_states_object<typename slot0_states_t::flags, states_based_condition_details::slot1_states_f>,
+        Receiver>;
+    // 主 MSO 吸收子结果（meta_object_invoke<MSO, MSO> 投递 slot1 的 flags）
+    using absorbed_states = meta_object_invoke<states_t, slot1_states_t>;
+
+    // index++：只有 slot1 未被禁用（本轮 receiver 被调用）才给 index 自增，写进下一轮条件状态。
+    // 若跳过（slot1 禁用），index 不变。用链式条件写入数据区低 8 位（u8 自增）。
+    using absorbed_flags = typename absorbed_states::flags;
+    using next_flags_t = typename absorbed_flags
+        ::template set_if<slot1_not_disable, meta_op_bits::u8, 0,
+                          static_cast<meta_op_bits::u8>(absorbed_flags::template get<meta_op_bits::u8, 0> + 1)>;
+    // 下一轮的主 MSO 条件状态
+    using new_main_states = typename absorbed_states::template meta_set<next_flags_t>;
+
+    // 本轮 flags（主 MSO 统筹后的结果）
+    using flags_t = typename new_main_states::flags;
+
+    // 是否继续：读 G_CONTINUE 位（slot0_states_f 在生成器产出 end_of_list 时清零）
+    static constexpr bool continue_ = flags_t::template get<bool, 63>;
+
+    // 用 flags 驱动原子操作（continue_=false 时本轮静止，不再推进/喂入）。
+    // gen_op 收 flags_operator 用 get 读 opcode；recv_op 收 flags_operator 走 meta_object_invoke 协议。
     using new_gen = typename std::conditional_t<continue_,
-        states_looper_detail::gen_op<gen_flags_v, Generator, Args...>,
-        states_looper_detail::gen_op<0, Generator, Args...>
+        states_looper_detail::gen_op<flags_t, Generator, Args...>,
+        states_looper_detail::gen_op<flags_operator<0>, Generator, Args...>  // 静止：opcode=OP_NONE
+        >::type;
+    using new_receiver = typename std::conditional_t<continue_,
+        states_looper_detail::recv_op<flags_t, Receiver, new_gen>,
+        states_looper_detail::recv_op<flags_operator<0>, Receiver, new_gen>  // 静止
         >::type;
 
-    // ===== 阶段 B：探测接收器阶段，按 slot1 操作接收器，递增 index =====
-    using final_states_t = typename gen_states_t::template probe_receiver<new_gen>;
-    static constexpr meta_op_bits::u64 flags_v = final_states_t::flags::value;
+    // 递归下一迭代：continue_ 决定进入 meta_looper_impl<true>（推进）或 <false>（终止），
+    // 终止分支不再实例化下一迭代（避免对空生成器再探测）。
+    using track_apply_t = meta_invoke<
+        meta_looper_impl<continue_, new_main_states, new_receiver, new_gen>,
+        Args...>;
 
-    // 对接收器执行 slot1 操作（输入是生成器操作后的 new_gen）
-    using new_state = typename std::conditional_t<continue_,
-        states_looper_detail::recv_op<flags_v, OBJ, new_gen>,
-        states_looper_detail::recv_op<0, OBJ, new_gen>
-        >::type;
-
-    // 递归下一迭代（continue_ 为 false 时不实例化）。
-    // 最终产出的 type 由 next_step 一路传到终止轮产出（G_PACK 则为 pack）。
-    using next_t = states_looper_detail::next_step<flags_v, continue_, final_states_t, new_state, new_gen, Args...>;
-    using type = typename next_t::type;
+    // 最终产出 type：
+    //   continue_ = true  -> 递归取下一轮的 type（一路传到终止轮）
+    //   continue_ = false -> 本轮产出 make_stage（G_PACK 置位则为 pack，否则接收器结果）
+    using type = std::conditional_t<continue_,
+        typename track_apply_t::type,
+        typename states_looper_detail::make_stage<
+            flags_t::value, new_gen, new_receiver, new_main_states>::type>;
 
     template <class... arg_types>
     static constexpr decltype(auto) for_each(auto&& f, arg_types&&... args) {
-      // 投递给回调的 stage：G_PACK 置位时为 pack，否则按 G_FEED_GEN 选生成器/接收器结果
-      using stage_t = typename states_looper_detail::make_stage<flags_v, new_gen, new_state, final_states_t>::type;
-      // bit62 G_NOT_SKIP 即 observe：0 时编译期跳过回调分支——
-      // 不推导 return_type、不实例化 f，只负责递归。
-      constexpr bool observe = (flags_v & meta_op_bits::G_NOT_SKIP) != 0;
+      // bit62 G_NOT_SKIP 即 observe：0 时不实例化 f、不推导返回类型，只递归
+      constexpr bool observe = flags_t::template get<bool, 62>;
 
-      if constexpr (!observe) {
-        // 当前阶段不需要观察：不实例化 f，只递归。
-        if constexpr (continue_) {
-          return next_t::for_each(f, std::forward<arg_types>(args)...);
-        } else {
-          // 没有更多阶段，返回 void。
-          return;
-        }
+      // 终止轮（continue_=false）不推进也不调回调，直接返回
+      if constexpr (!continue_) {
+        return;
+      } else if constexpr (!observe) {
+        // 当前阶段不需要观察：不实例化 f，只递归
+        return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
       } else {
+        using stage_t = typename states_looper_detail::make_stage<
+            flags_t::value, new_gen, new_receiver, new_main_states>::type;
         using return_type =
             std::invoke_result_t<decltype(f), stage_t, arg_types...>;
-
         if constexpr (std::is_void_v<return_type>) {
-          // 返回 void：检查下一层是否继续
-          if constexpr (continue_) {
-            std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-            return next_t::for_each(f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-          }
+          std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+          return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
         } else {
-          // 返回非 void：不提前构造返回值。
-          // 后续还要递归时丢弃当前返回值，否则直接返回当前调用结果。
-          if constexpr (continue_) {
-            (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-            return next_t::for_each(f, std::forward<arg_types>(args)...);
-          } else {
-            return std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
-          }
+          (void)std::invoke(f, stage_t{}, std::forward<arg_types>(args)...);
+          return track_apply_t::for_each(f, std::forward<arg_types>(args)...);
         }
       }
     }
 
     // 每轮消费一个参数 first 喂给 f(stage_t, first)，剩余 args 传给下一轮。
-    // observe=false 时不实例化 f、不推导返回类型，仅按剩余参数继续递归。
+    // observe=false 时不实例化 f、不推导返回类型，仅按剩余参数递归。
     template <class first_arg_type, class... arg_types>
     static constexpr decltype(auto) for_each_forward(auto&& f, first_arg_type&& first, arg_types&&... args) {
-      using stage_t = typename states_looper_detail::make_stage<flags_v, new_gen, new_state, final_states_t>::type;
-      constexpr bool observe = (flags_v & meta_op_bits::G_NOT_SKIP) != 0;
+      constexpr bool observe = flags_t::template get<bool, 62>;
       // 是否还有下一轮参数可供 forward
       constexpr bool has_next = continue_ && (sizeof...(arg_types) > 0);
 
-      if constexpr (!observe) {
-        // 不实例化 f：仅消费 first，按剩余参数递归。
+      if constexpr (!continue_ || !observe) {
+        // 终止或不观察：不实例化 f。若还有参数则继续递归传递。
         if constexpr (has_next) {
-          return next_t::for_each_forward(f, std::forward<arg_types>(args)...);
+          return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
         } else {
           return;
         }
       } else {
+        using stage_t = typename states_looper_detail::make_stage<
+            flags_t::value, new_gen, new_receiver, new_main_states>::type;
         using return_type =
             std::invoke_result_t<decltype(f), stage_t, first_arg_type>;
-
         if constexpr (std::is_void_v<return_type>) {
           if constexpr (has_next) {
             std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
-            return next_t::for_each_forward(f, std::forward<arg_types>(args)...);
+            return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
           } else {
             return std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
           }
         } else {
           if constexpr (has_next) {
             (void)std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
-            return next_t::for_each_forward(f, std::forward<arg_types>(args)...);
+            return track_apply_t::for_each_forward(f, std::forward<arg_types>(args)...);
           } else {
             return std::invoke(f, stage_t{}, std::forward<first_arg_type>(first));
           }
@@ -989,6 +1025,21 @@ struct meta_looper_impl<true, meta_states_object<Flags, Probe, Fn...>, OBJ, Gene
     }
   };
 };
+
+template <class Cond, class Receiver, class Generator>
+struct meta_looper_impl<false, Cond, Receiver, Generator> {
+  static constexpr bool _continue_ = false;
+  using type = typename Receiver::type;
+  template <class... Args>
+  struct apply {
+    using type = typename Receiver::type;
+    template <class... arg_types>
+    static constexpr decltype(auto) for_each(auto&&, arg_types&&...) { return; }
+    template <class first_arg_type, class... arg_types>
+    static constexpr decltype(auto) for_each_forward(auto&&, first_arg_type&&, arg_types&&...) { return; }
+  };
+};
+
 }  // namespace meta_looper_detail
 
 template <class C, class O, class G, class... ARG_Tys>

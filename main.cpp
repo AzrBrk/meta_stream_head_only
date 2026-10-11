@@ -39,6 +39,9 @@ using meta_basic_istream =
     meta_ret_object<list_dec<TL>, unary<pop_f>>;
  // namespace meta_basic_istream_detail
 
+ template<class TL>
+ using meta_istream = meta_basic_istream<TL>;
+
 
 
 template <class none_list_type, class T>
@@ -57,6 +60,9 @@ using add_f = typename add_impl<this_list, T>::type;
 template <class TL = exp_list<>>
 using meta_basic_ostream = meta_object<TL, binary<add_f>>;
 
+template<class TL = exp_list<>>
+using meta_ostream = meta_basic_ostream<TL>;
+
 namespace timer_condition_details {
 struct timer_receiver {
   template <class timer, class...>
@@ -68,45 +74,11 @@ using meta_timer_cond_o =
   
 
 using namespace meta_op_bits;
+using namespace meta_loop::meta_looper_detail::states_based_condition_details;
 
-// skip_at<I>：当 flags 的当前索引等于 I 时，关闭回调并关闭 slot1 的 apply；
-// 当索引等于 I+1 时恢复。不含 inc_index_f（由 meta_states_object 默认追加）。
-template<u64 I>
-struct skip_at{
-  template<class flags_t>
-  using apply = flags_fold<flags_t,
-      deact_if_f<G_NOT_SKIP, (flags_t::value & D_INDEX_MASK) == I>,
-      deact_if_f<(static_cast<u64>(S_APPLY) << SLOT1_SHIFT), (flags_t::value & D_INDEX_MASK) == I>,
-      set_if_f<G_NOT_SKIP, (flags_t::value & D_INDEX_MASK) == I + 1>,
-      set_if_f<(static_cast<u64>(S_APPLY) << SLOT1_SHIFT), (flags_t::value & D_INDEX_MASK) == I + 1>
-    >;
-};
-
-// list 专用 probe：meta_basic_istream 的 ::type 是 exp_list。
-// 耗尽判定：::type 为空，或本轮产出（::ret）已是 end_of_list。
-// 命中时清 G_CONTINUE 且关 slot1（不把 end_of_list 喂给接收器）。
-struct list_probe_f{
-  template<class T>
-  using apply = T;  // 满足 meta_function_t 约束（占位）
-
-  template<class MOBJ, class = void>
-  struct detect : std::false_type {};  // 无 ::type：未耗尽（initializer 形态）
-  template<class MOBJ>
-  struct detect<MOBJ, std::void_t<typename MOBJ::type>>
-      : std::bool_constant<
-            length_equal<typename MOBJ::type, 0> ||
-            std::is_same_v<typename MOBJ::ret, exp_utilities::literal_types::end_of_list>> {};
-
-  // 耗尽：清 G_CONTINUE（终止）+ 关 slot1 S_APPLY（不喂 end_of_list）
-  template<class MOBJ>
-  using step = deact_if_f<
-      G_CONTINUE | (static_cast<u64>(S_APPLY) << SLOT1_SHIFT),
-      detect<MOBJ>::value>;
-};
-
-// meta_states_object 直接作为条件元对象：list_probe_f 探测生成器耗尽，
-// skip_at<2> 在第 2 步关闭接收器 apply（跳过）并关回调，第 3 步恢复。
-using flags_test_o = meta_states_object<flags_operator<default_ops>, list_probe_f, skip_at<2>>;
+// 条件元对象：Fn 什么都不做（identity_f），耗尽终止由 slot0_states_f 自动检测
+// （生成器产出 end_of_list 时自动清 G_CONTINUE）。
+using flags_test_o = meta_states_object<flags_operator<default_ops>, main_states_f<identity_f>>;
 struct replace_f
 {
   template <class this_obj, class T>
@@ -128,6 +100,45 @@ void print_list(){
   });
   std::cout << std::endl;
 }
+
+namespace meta_aligned_iterator_details {
+template <std::size_t start, class from_ins>
+struct seek_to {
+  static constexpr std::size_t align = alignof(from_ins);
+  // O(1): round start up to the next multiple of align.
+  // alignof is always a power of 2, so this bit math replaces the
+  // old per-byte scan via transfer_until + index_istream.
+  static constexpr std::size_t value = (start + align - 1) & ~(align - 1);
+  using advance_t =
+      std::integral_constant<std::size_t, value + sizeof(from_ins)>;
+  using type = from_ins;
+  void emplace(std::byte* ptr, type const& val) { new (ptr + value) type{val}; }
+  void emplace(std::byte* ptr, type&& val) {
+    new (ptr + value) type{std::move(val)};
+  }
+  void destroy(std::byte* ptr) {
+    std::destroy_at(reinterpret_cast<type*>(ptr + value));
+  }
+  std::byte* address_of(std::byte* base_ptr) const { return base_ptr + value; }
+  type& get(std::byte* ptr) { return *reinterpret_cast<type*>(ptr + value); }
+  type const& c_get(const std::byte* ptr) const {
+    return *reinterpret_cast<const type*>(ptr + value);
+  }
+};
+struct advance_f {
+  template <class this_seek, class from_is>
+  using apply = seek_to<this_seek::advance_t::value, from_is>;
+  template <class from_is>
+  using initialize = seek_to<0, from_is>;
+};
+}  // namespace meta_aligned_iterator_details
+/// <summary>
+/// for meta_aligned_iterator, it is a meta_ostream_t that can seek to an
+/// aligned address for a specific type in a byte stream, and it can also
+/// advance to the next aligned address for the next type.
+/// </summary>
+using meta_aligned_iterator = meta_object<meta_aligned_iterator_details::advance_f>;
+
 
 int main(){
   int i = 0;
@@ -154,7 +165,7 @@ int main(){
   });
   std::cout << "final i=" << i << std::endl;
 
-  // 最终 type（G_PACK 下为 loop_pack）。取其接收器累积列表 state::type 打印。
+  // 最终 type 是 loop_pack（G_PACK）。取其接收器累积列表 state::type 打印。
   using result_list = typename loop_result::type::state::type;
   std::cout << "state list: ";
   print_list<result_list>();
