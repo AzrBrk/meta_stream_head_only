@@ -142,6 +142,7 @@
     <ClInclude Include="meta_utilities.hpp" />
     <ClInclude Include="meta_invoke_protocols.hpp" />
     <ClInclude Include="meta_objects.hpp" />
+    <ClInclude Include="meta_states_looper.hpp" />
     <ClInclude Include="meta_ios.hpp" />
     <ClInclude Include="meta_stream.hpp" />
     <ClInclude Include="type_safe_aligned_iterator.hpp" />

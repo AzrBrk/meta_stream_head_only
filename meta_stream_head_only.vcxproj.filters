@@ -24,6 +24,9 @@
     <ClInclude Include="meta_objects.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="meta_states_looper.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="meta_ios.hpp">
       <Filter>头文件</Filter>
     </ClInclude>

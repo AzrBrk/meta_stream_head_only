@@ -71,6 +71,85 @@ template<class OBJ, class F, class Ret> struct meta_ret_object {
 
 ### 1.4 states 对象：`stream_op` / `states_base` / `meta_make_states`
 
+#### Experimental `meta_states_looper.hpp` bit foundation
+
+Include `meta_states_looper.hpp` separately. This header currently defines only
+the proposed bit layout and state transformations in `meta_loop`; it does not
+yet implement `meta_states_looper`, its callbacks, or helper conditions.
+Existing `meta_looper` behavior is unchanged.
+
+| Bits | Field |
+|---|---|
+| 63 | `G_CONTINUE`: allow the next iteration; clearing it breaks before execution |
+| 62 | `G_NOT_SKIP`: allow the callback, independently of reception |
+| 61 | `G_FEED_GEN`: reserved for feeding the generator |
+| 60 | `G_PACK`: reserved for callback stage packing |
+| 59 | `G_FORWARD`: reserved for argument forwarding |
+| 58 | `G_FINISH`: stop after completing the current iteration |
+| 57 | `G_RECEIVE`: allow receiver execution |
+| 56 | `G_ADVANCE`: allow input advancement |
+| 40-55 | Timer 1: low 6 bits = target bit position, high 10 bits = remaining count |
+| 24-39 | Timer 0: same encoding |
+| 16-23 | User-owned state |
+| 0-15 | Input position, advancing with `G_ADVANCE`, not `G_RECEIVE` |
+
+`meta_loop::meta_states_looper_default` enables continue, callback, pack,
+forward, receive, and advance. Feed-generator and finish are off. Names and
+the exact meanings of the reserved gates remain provisional until the engine
+API is designed; there is no hook field.
+
+```cpp
+using namespace meta_loop;
+using namespace meta_loop::meta_states_looper_bits;
+
+struct Fn {
+    template<class Flags, class... Objects>
+    using apply = complete_iteration<Flags>;
+};
+using main_condition =
+    meta_objects::meta_states_object<meta_states_looper_default, Fn>;
+
+// Suppress advancement for the next two completed iterations.
+using paused = set_timer<typename main_condition::flags, 0, G_ADVANCE, 2>;
+using configured = main_condition::meta_set<paused>;
+using current_gates = effective<paused>;
+using after_one = complete_iteration<paused>;
+```
+
+`set_timer<Flags, Slot, Target, Count>` accepts slots 0 or 1, a single target
+(`G_NOT_SKIP`, `G_RECEIVE`, or `G_ADVANCE`), and counts 0-1023. Invalid template
+arguments are rejected. Zero count is inactive; `clear_timer` clears the entire
+slot. Replacing a slot replaces its target and count. Both active timers suppress
+their targets, so overlapping timers keep a gate suppressed until both expire.
+`effective<Flags>` computes gates without modifying requested base values;
+expiration never re-enables a base gate the user disabled.
+
+`tick_timers<Flags>` decrements both nonzero counts without advancing position.
+`complete_iteration<Flags>` uses the current effective advance gate, increments
+the 16-bit position with unsigned wraparound, ticks both timers once even when
+advancement is suppressed, and clears `G_CONTINUE` if `G_FINISH` was set. Call it
+only after a completed iteration, not on a break-before decision. It preserves
+user bits and requested gates except for this finish transition. The example
+`Fn` demonstrates these transformations, not a finalized condition protocol.
+Callable `eos`/`skip`/`block` decisions and callback forwarding are deferred.
+
+The experimental internal `control_fn` selects `stage_fn` using the upper
+nibble of the user byte (one-hot stage tags `0x10`, `0x20`, `0x40`, `0x80`).
+It invokes `states_executor` through `meta_invoke`, passing the stage tag as
+`std::integral_constant<u8, Stage>`; the executor selects `stage_fn<Stage>`.
+It passes the complete current flags and the object to that stage and returns
+the stage's updated flags directly, without OR-merging them. Each stage advances
+the upper nibble: before generator (`0x10`) -> after generator (`0x20`) ->
+before receiver (`0x40`) -> after receiver (`0x80`) -> before generator (`0x10`).
+The lower user nibble is preserved. Initialize the user byte to `0x10` (plus
+any lower-nibble user bits) before invoking this control function; the default
+flags constant alone has no stage selected.
+The before-generator stage also clears `G_CONTINUE` when the object's produced
+type is `end_of_list`, while still advancing the stage tag. Otherwise these
+stages preserve all other flags, including an already cleared continue gate.
+They do not tick timers or advance position. The other three stages currently
+only advance the stage tag.
+
 流中间那一步"遇到什么、要不要改、要不要停"的逻辑，库鼓励你写成一个**states 类**（而不是模板特化/偏特化）。一个完整的 states 类可以提供四个成员：
 
 | 成员 | 形状 | 作用 |

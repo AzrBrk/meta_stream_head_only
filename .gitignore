@@ -361,3 +361,11 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# local build output (g++ command line)
+*.exe
+*.o
+*.obj
+*.ilk
+*.pdb
+output/*.exe

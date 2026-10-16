@@ -19,6 +19,8 @@ struct end_of_list {
   using front = no_exist_type;
   using back = no_exist_type;
 };
+template<class TL>
+constexpr bool list_end = std::is_same_v<TL, end_of_list>;
 
 template <class T>
 struct error {
@@ -505,6 +507,18 @@ constexpr bool value_equal = false;
 template <class T, auto cmp>
   requires has_value<T>
 constexpr bool value_equal<T, cmp> = T::value == cmp;
+
+template<class T>
+struct value_of_type{
+  static constexpr auto value = literal_types::no_exist_type{};
+};
+template<class T> requires(has_type<T>)
+struct value_of_type<T>{
+  static constexpr auto value = T::value;
+};
+
+template<class T>
+constexpr auto value_of = value_of_type<T>::value;
 
 template <auto val>
 struct value_is {
