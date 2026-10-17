@@ -2,7 +2,9 @@
 
 > 适用文件：`meta_states.hpp` / `meta_states_looper.hpp`
 >
-> 本文面向使用 `meta_states` 的用户，说明这个“状态循环器”怎么工作、怎么配置、以及如何编写自己的 executor / receiver / generator。
+> **重要说明：这个库仍在开发中，公开 API 仍可能调整。**
+> 建议你关注仓库更新，或直接查看最新的 `meta_states.hpp` 获取当前对外入口。
+> 同时，`meta_iostream.hpp` 中也提供了一些常用的元对象流，可与 `meta_states` 配套使用。
 
 ---
 
@@ -448,9 +450,49 @@ using f2 = typename f1::template set<u64, 0, G_FINISH>;
 
 ---
 
-## 15. 常见坑
+## 15. `meta_iostream.hpp` 中的常用元对象流
 
-### 15.1 不要把用户自定义位写进 gates 字节里
+如果你在写 `meta_states` 的条件、接收器或生成器，`meta_iostream.hpp` 里有一些常用流可以直接拿来用。
+
+### 15.1 读取流
+
+- `meta_istream<TL>`：从类型列表前往后读
+- `meta_ristream<TL>`：从后往前读
+- `meta_transform_istream<TL, F>`：读取时先对 `front` 做变换
+- `meta_index_istream<start>`：永不结束，持续吐递增下标
+- `index_sequence_istream<Len>`：吐 `0..Len-1`，到头结束
+- `meta_repeat_istream<T>`：永不结束，重复吐同一个类型
+
+### 15.2 写入流
+
+- `meta_ostream<TL>`：普通追加型输出流
+- `meta_jostream<TL>`：如果输入本身是类型列表，则自动摊平合并
+- `meta_rostream<TL>`：前插型输出流，结果顺序会反转
+- `meta_filter_ostream<TL, pred>`：满足谓词才写入
+- `meta_transform_ostream<TL, F>`：写入前先做变换
+- `meta_forward_ostream<TL, F>`：按位置映射输入
+- `meta_iterator`：可替换状态的 iterator 风格 ostream
+- `meta_transform_iterator<F, init>`：带初始化能力的 iterator 风格对象
+- `meta_aligned_iterator`：把类型映射到运行期对齐地址偏移
+
+### 15.3 这些流和 meta_states 的关系
+
+它们都是普通元对象，所以可以直接和 `meta_states::run`、`meta_states::looper` 配合。
+
+如果你的状态逻辑需要：
+
+- 逐个消费类型
+- 构造/拼接类型列表
+- 过滤、映射、折叠
+- 生成有界或无界序列
+
+这些流会非常常用。
+
+---
+
+## 16. 常见坑
+
+### 16.1 不要把用户自定义位写进 gates 字节里
 
 gates 字节是 looper 的控制区。
 
@@ -459,21 +501,25 @@ gates 字节是 looper 的控制区。
 - `user_shift` 的低 4 位
 - 或者别的你自己管理的 payload 中
 
-### 15.2 计时器目标只能是单 bit
+### 16.2 计时器目标只能是单 bit
 
 不要把多个控制位混在一个 timer target 里。
 
-### 15.3 `G_FINISH` 是一次性的
+### 16.3 `G_FINISH` 是一次性的
 
 它会在结转时清除，不要拿它当长期状态位。
 
-### 15.4 `G_PACK` 会改变回调看到的类型
+### 16.4 `G_PACK` 会改变回调看到的类型
 
 如果你开启了 `G_PACK`，回调参数就不再是单纯的 Receiver / Generator 产物，而是打包视图。
 
+### 16.5 注意版本更新
+
+这个库仍在开发中，`meta_states.hpp` 才是最适合关注的对外入口；如果你依赖较多内部细节，建议定期对照最新头文件。
+
 ---
 
-## 16. 速查表
+## 17. 速查表
 
 ### 入口
 
@@ -508,9 +554,25 @@ gates 字节是 looper 的控制区。
 - `tick_timers`
 - `effective`
 
+### 常用元对象流
+
+- `meta_istream`
+- `meta_ristream`
+- `meta_transform_istream`
+- `meta_ostream`
+- `meta_jostream`
+- `meta_rostream`
+- `meta_filter_ostream`
+- `meta_forward_ostream`
+- `meta_index_istream`
+- `index_sequence_istream`
+- `meta_repeat_istream`
+- `meta_iterator`
+- `meta_transform_iterator`
+- `meta_aligned_iterator`
+
 ---
 
-## 17. 一句话总结
+## 18. 一句话总结
 
 `meta_states_looper` 是一个“由 flags 驱动的编译期四窗口循环器”，你通过 `Executor` 定义每个窗口的规则，通过 `Receiver / Generator` 定义数据流动，通过 `meta_states.hpp` 暴露的 API 完成可组合、可暂停、可计时、可打包的状态循环。
-
